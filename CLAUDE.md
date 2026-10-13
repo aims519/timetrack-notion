@@ -17,6 +17,7 @@ This is a learning project for the author, designed to increase their proficienc
 - Explain go idioms, point to docs, and review the code the author writes
 - Small snippets may be generated to illustrate a concept, but nothing that is designed to be copy-pasted into the source code directly
 - `go.mod` and `go.sum` are not source files: Claude may manage them (for example by running `go mod init` or `go mod tidy`) when asked
+- Formatting is the one exception to the no-editing rule: Claude may run `go fmt ./...`, which only changes layout. Nothing else in a go file is changed without being asked, and `golangci-lint run --fix` is not covered by this
 
 Claude can assist with non-go files such as docs, CI/CD config, commit messages, PR descriptions etc.
 
@@ -27,6 +28,19 @@ Claude can assist with non-go files such as docs, CI/CD config, commit messages,
 - Small interfaces
 - table-driven tests
 - `httptest` fakes (no live Notion calls in tests)
+
+## Before committing
+
+Run from the repo root, and fix or report anything that fails:
+
+- `go fmt ./...`
+- `go mod tidy -diff` (run `go mod tidy` if it reports a difference)
+- `go build ./...`
+- `go vet ./...`
+- `go test ./...`
+- `golangci-lint run`
+
+CI runs the same checks (`.github/workflows/ci.yml`).
 
 ## Design rules that must not be broken
 

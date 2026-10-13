@@ -1,5 +1,7 @@
 # timetrack-notion
 
+[![CI](https://github.com/aims519/timetrack-notion/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/aims519/timetrack-notion/actions/workflows/ci.yml)
+
 A small Go command-line tool for tracking time against tasks. It works fully offline, with all time entries saved locally first in a SQLite database, and syncs finished entries to Notion.
 
 ## Status

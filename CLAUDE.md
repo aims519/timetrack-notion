@@ -1,5 +1,9 @@
 # Working with Claude Code on this repo
 
+## What this is
+
+`tt` (a placeholder name) is a small Go CLI for tracking time against tasks. It works fully offline, stores everything in a local SQLite database, and syncs finished entries to Notion.
+
 ## Design
 
 Design for the project lives in [docs/DESIGN.md](docs/DESIGN.md) and should always be the source of truth. It may be changed during the course of the project but only with express permission from the owner.
@@ -23,3 +27,12 @@ Claude can assist with non-go files such as docs, CI/CD config, commit messages,
 - Small interfaces
 - table-driven tests
 - `httptest` fakes (no live Notion calls in tests)
+
+## Design rules that must not be broken
+
+Details are in [docs/DESIGN.md](docs/DESIGN.md); these are the ones to check code and reviews against.
+
+- The Notion token is never stored in a file or the database, and never accepted as a flag. It comes from `NOTION_TOKEN` or the OS keychain (§9)
+- One writer for sync: every sync takes the sync lock before reading any entry (§6.5)
+- Commit locally before any network call. A failed or timed-out sync never loses or fails a change (§6.5)
+- JSON output is the contract. Table output is for humans and may change (§8)

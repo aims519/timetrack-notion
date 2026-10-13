@@ -1,0 +1,49 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+!coverage.go
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env files
+.env
+.env.*
+
+# Built binary
+/tt
+/bin/
+
+# Local SQLite databases (TT_DB), including WAL-mode companions
+*.db
+*.db-wal
+*.db-shm
+
+# macOS
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Claude Code — local, uncommitted working agreements
+CLAUDE.local.md
+
+# Editor/IDE
+# .idea/
+# .vscode/

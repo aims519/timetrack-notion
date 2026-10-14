@@ -71,7 +71,7 @@ An `--end` given as `HH:MM` together with `--start` is read relative to the star
 3. An **order number** such as `4.1`, accepted only if exactly one open task in the current project has that order. If several do, it is ambiguous. (Short IDs are at least 6 characters, so they are not mistaken for order numbers.)
 4. **Words from the task name**, matched within the current project's open tasks (see the matching rules below).
 
-If several tasks match, ask which one (interactive), or fail with `ambiguous_selector` (exit 3) listing the candidates with short IDs (non-interactive; see §8). `--task` always takes a value; a bare `--task` is a usage error. **`--pick`** is a separate flag, accepted by `start`, `add` and `edit`, with no short form, that opens an interactive picker over the current project's open tasks, sorted by Order, then name. `--pick` and `--task` are mutually exclusive, and without a terminal `--pick` is a usage error (exit 2). The picker, like any lookup, runs before anything is written, and the start timestamp of `start` is captured before it opens, so time spent choosing is not lost. **Cancelling the picker (Esc or Ctrl-C) changes no data**: no entry is created, edited or started, a running timer (including the one `--switch` would have stopped) is left exactly as it was, and the command exits 2 with `cancelled`. `--all` includes done tasks in the picker. A selector must resolve to a cached task; otherwise it fails with `not_found` (exit 3), whose `details` list matches from other projects in the context, if any, with their project names. In a local-only context there is no task cache at all, so every selector, and the picker, fails with `not_initialised` (exit 5).
+If several tasks match, ask which one (interactive), or fail with `ambiguous_selector` (exit 3) listing the candidates with short IDs (non-interactive; see §8). `--task` always takes a value; a bare `--task` is a usage error. **`--pick`** is a separate flag, accepted by `start`, `add` and `edit`, with no short form, that opens an interactive picker over the current project's open tasks, sorted by Order, then name (tasks with no Order last). `--pick` and `--task` are mutually exclusive, and without a terminal `--pick` is a usage error (exit 2). The picker, like any lookup, runs before anything is written, and the start timestamp of `start` is captured before it opens, so time spent choosing is not lost. **Cancelling the picker (Esc or Ctrl-C) changes no data**: no entry is created, edited or started, a running timer (including the one `--switch` would have stopped) is left exactly as it was, and the command exits 2 with `cancelled`. `--all` includes done tasks in the picker. A selector must resolve to a cached task; otherwise it fails with `not_found` (exit 3), whose `details` list matches from other projects in the context, if any, with their project names. In a local-only context there is no task cache at all, so every selector, and the picker, fails with `not_initialised` (exit 5).
 
 **Name matching (rule 4).** Lexical only; v1 has no fuzzy or semantic matching.
 
@@ -118,7 +118,7 @@ The commands that change entries (`stop`, `add`, `edit`, `delete`, `attach`, and
 | `tt context set <name> [--project <name>] [--rename <new-name>]` | Creates or edits a context, found by name or ID. `--rename` changes the display label only; the ID, entries and cache are untouched. Names must be unique. |
 | `tt context delete <name> [--yes]` | Removes the context and everything that belongs to it (entries, cached tasks and projects) in one transaction, then its keychain token. Confirms first (or requires `--yes`); warns about unsynced entries; refuses if the running timer belongs to it, and refuses to delete the current context (switch first), so there is always a current one. |
 | `tt project list \| current \| use <name>` | List cached projects, show, or set the current context's default project. Shortcut for `context set --project`. |
-| `tt task list [--project NAME] [--all] [--limit N]` | Lists cached tasks (default: the current project's open tasks, sorted by Order, then name) with order, short ID and name. This is how scripts and agents discover task IDs. `--all` includes done tasks. |
+| `tt task list [--project NAME] [--all] [--limit N]` | Lists cached tasks (default: the current project's open tasks, sorted by Order, then name, with tasks that have no Order last) with order, short ID and name. This is how scripts and agents discover task IDs. `--all` includes done tasks. |
 | `tt task refresh [--full]` | Refreshes the task cache now, ignoring the TTL, the 2s cap and any back-off. `--full` fetches everything, which also detects deleted or archived tasks. |
 | `tt config list \| get <key> \| set <key> <value>` | Reads and writes the global settings (§4). `set` validates the value: an unknown key, a malformed duration, or an unknown timezone fails with `usage` (exit 2). Supports `--output json`. |
 
@@ -355,7 +355,7 @@ This example exits with code 1 (an entry failed in this run). The per-entry `err
 
 By default, a command that leaves entries waiting to be pushed makes one short, best-effort sync attempt after it has saved its change locally. This is what "background sync" means here: no daemon and no separate process, just the same process finishing its work. Manual `tt sync` stays available and works exactly as in §6.1 to §6.4.
 
-**Which commands.** `stop`, `add`, `edit`, `delete` and `attach`, and `start --switch` when the entry it stopped has a task: the commands that create or change a pushable entry. A plain `start`, `status`, `list` and the read-only commands never sync. `start --switch` accepts `--sync` / `--no-sync` and returns the `sync` object for the entry it stopped; a plain `start` has neither.
+**Which commands.** `stop`, `add`, `edit`, `delete` and `attach`, and `start --switch` when the entry it stopped has a task: the commands that create or change a pushable entry. A plain `start`, `status`, `list` and the read-only commands never sync. `start --switch` accepts `--sync` / `--no-sync` and returns the `sync` object for the entry it stopped; a plain `start` has neither the flags nor a `sync` object (its `sync` key is `null`, §8).
 
 **What it syncs.** The entry the command just changed goes first, then any other pending entries, until the time limit runs out. Anything left stays pending for the next sync, automatic or manual.
 
@@ -402,9 +402,12 @@ The CLI is designed to be driven by scripts and AI agents as well as people. The
 
 - One JSON document on stdout per invocation, with a top-level `schema_version` integer.
 - Mutating commands return the resulting object under `entry` (`start`, `stop`, `add`, `attach`, `edit`, `delete`), or per-entry results plus a summary (`sync`), so no follow-up `list` is needed. Commands that can trigger an automatic sync (§6.5) also include a `sync` object saying what happened to it.
-- Fields are never omitted: absent values are `null`. IDs are always included.
-- Timestamps are RFC 3339 in UTC; durations are integer seconds.
-- Notices that would otherwise be a line of text (e.g. "using task cache from 3h ago", or an `HH:MM` that resolved to yesterday) appear in a `warnings` array. Overlaps with existing entries (from `start --at/--ago`, `add`, or `edit`) are reported there too, with the IDs of the overlapping entries.
+- Fields are never omitted: absent values are `null`. IDs are always included. A command's set of keys is fixed, so a key that does not apply to an invocation (such as `stopped` or `sync` on a plain `start`) is `null`, not missing. `"sync": null` means the command never syncs; a `sync` object with `"attempted": false` means it would have but did not (§6.5).
+- Timestamps are RFC 3339 in UTC; durations are integer seconds everywhere, including in `config` output (the command line still accepts `5s` and `12h` as input).
+- Key naming: a command that returns many things uses a plural key holding an array (`entries`, `tasks`, `contexts`); one that returns a single thing uses the singular key (`entry`, `context`).
+- Notices that would otherwise be a line of text (e.g. "using task cache from 3h ago", or an `HH:MM` that resolved to yesterday) appear in a `warnings` array, present in every success document except `sync`'s (which reports problems per entry, §6.4) and `[]` when empty. Each warning is an object, `{"code", "message", "details"}`: `code` is stable and documented, `message` is not, and `details` is `null` when there is nothing to add. Overlaps with existing entries (from `start --at/--ago`, `add`, or `edit`) are reported as `overlap` warnings whose `details.entry_ids` lists the overlapping entries. The warning codes are `overlap`, `time_resolved_to_yesterday`, `ambiguous_local_time`, `stale_timer`, `task_cache_stale` and `sync_note`.
+- Commands with `--limit` (`list`, `task list`) include `"truncated"`, true when the limit cut the result.
+- Array order is part of the contract: `list` is chronological, and `task list` is sorted by Order, then name, with tasks that have no Order last.
 - `--wide` affects table output only.
 - Discovery: agents find task IDs with `tt task list --output json` and entry IDs with `tt list --output json` (or from the response to `start` and `stop`). Every selector accepts the IDs those commands return.
 
@@ -423,16 +426,66 @@ The CLI is designed to be driven by scripts and AI agents as well as people. The
 
 | Command | Document (besides `schema_version`) |
 |---|---|
-| `start` | `entry`, `stopped` (`null`, or the entry that `--switch` stopped), `sync` (only with `--switch`), `warnings` |
+| `start` | `entry`, `stopped` (`null`, or the entry that `--switch` stopped), `sync` (`null` unless `--switch`), `warnings` |
 | `stop`, `add`, `attach`, `edit` | `entry`, `sync`, `warnings` |
-| `delete` | `entry`, `removed` (true if removed outright rather than tombstoned), `sync`, `warnings`. With `--dry-run`: `dry_run: true`, `action` (`remove` or `tombstone`), `entry`. |
-| `status` | `running` (an entry or `null`), `today` (`entries`, `minutes`), `counts` (`pending`, `blocked`, `waiting`), `context` (`id`, `name`, `connected`), `warnings` (including the stale-timer warning) |
-| `list` | `entries` (an array), `total_minutes`, `warnings` |
-| `task list` | `tasks` (an array of `page_id`, `short_id`, `order`, `name`, `project`, `done`), `warnings` |
+| `delete` | `dry_run`, `action` (`remove` or `tombstone`), `entry`, `removed` (true if removed outright rather than tombstoned), `sync`, `warnings`. With `--dry-run`, `dry_run` is true and `removed` and `sync` are `null`: nothing was changed, so there is no outcome and no sync. |
+| `status` | `running` (an entry or `null`), `elapsed_seconds` (`null` when nothing is running), `today` (`entries`, `minutes`), `counts` (`pending`, `blocked`, `waiting`), `context` (`id`, `name`, `connected`), `warnings` (including the stale-timer warning) |
+| `list` | `entries` (an array), `total_minutes`, `truncated`, `warnings` |
+| `task list` | `tasks` (an array of task items, below), `truncated`, `warnings` |
 | `sync` | `results` and `summary` (§6.4) |
-| `config`, `context`, `project`, `init` | the affected objects under `settings`, `contexts`, `projects` or `context` |
+| `config list \| get \| set` | `settings` (every key for `list`, defaults filled in; just the key concerned for `get` and `set`), `warnings` |
+| `context`, `project`, `init`, `task refresh` | the affected objects, named by the key rule above (`contexts`, `context`, `projects`, `project`); their fields are fixed when those commands are built |
 
 A collection is always an object holding an array, never a bare array, so it can carry `warnings` and totals.
+
+**Task item.** Wherever a task appears in a list (`task list`, and the `candidates` and `elsewhere` lists in errors), it has these fields:
+
+```
+{"page_id": "3f63b23e…", "short_id": "837922", "order": 2.3,
+ "name": "Learn: error wrapping", "project": {"page_id": "3e73b23e…", "name": "Go Time Tracker"},
+ "done": false}
+```
+
+`order` is a number, or `null` when unset (it is not unique). `project` is an object, or `null` for a task with no project.
+
+**`status` and "today".** `elapsed_seconds` is the running entry's elapsed time, measured with the same clock reading as `today.minutes`. A running entry shows `end`, `seconds` and `minutes` as `null`, so this is how a script learns how long it has been running. `today.entries` is a count (`list` returns the entries themselves). `today.minutes` and `list`'s `total_minutes` are the minutes of all finished entries plus the elapsed minutes of the running entry, so the two commands agree. A running entry belongs to the day it started (§3.2), so a timer left running from yesterday is not part of "today"; the `stale_timer` warning flags it. Minutes are summed from each entry's own `minutes` value (§5), and the running entry's is computed the same way with the current time as its end.
+
+**Examples**
+
+`tt start --switch` (the `entry` and `stopped` values are entry objects, shortened here):
+
+```
+{"schema_version": 1,
+ "entry": {"id": "b2c3d4e5-…", "start": "2026-10-14T10:12:40Z", "end": null, "seconds": null, …},
+ "stopped": {"id": "a1b2c3d4-…", "start": "2026-10-14T09:00:12Z", "end": "2026-10-14T10:12:40Z",
+             "seconds": 4348, "minutes": 72, …},
+ "sync": {"attempted": true, "result": "synced", "pending": 0},
+ "warnings": []}
+```
+
+A plain `tt start` returns the same keys with `"stopped": null` and `"sync": null`.
+
+`tt delete --dry-run`:
+
+```
+{"schema_version": 1, "dry_run": true, "action": "tombstone",
+ "entry": {"id": "a1b2c3d4-…", …}, "removed": null, "sync": null, "warnings": []}
+```
+
+`tt status` with nothing running, in a local-only context (exit 0):
+
+```
+{"schema_version": 1, "running": null, "elapsed_seconds": null,
+ "today": {"entries": 0, "minutes": 0}, "counts": {"pending": 0, "blocked": 0, "waiting": 0},
+ "context": {"id": "5d4c3b2a-…", "name": "default", "connected": false}, "warnings": []}
+```
+
+A warning:
+
+```
+{"code": "overlap", "message": "overlaps 1 existing entry",
+ "details": {"entry_ids": ["9f8e7d6c-…"]}}
+```
 
 **Streams.** Data goes to stdout; diagnostics, warnings and errors go to stderr. No colour, spinners or progress output when stdout is not a terminal or `NO_COLOR` is set.
 
@@ -459,6 +512,23 @@ A collection is always an object holding an array, never a bare array, so it can
 | 10 | Unexpected internal error | `internal` |
 
 `status` exits 0 even when nothing is running or the context is not connected; "nothing running" is a valid answer, not an error.
+
+**Error `details`.** `details` carries structured data a script can act on, and is `null` when there is none; it never repeats the message. The codes that carry it:
+
+| Code | Exit | `details` |
+|---|---|---|
+| `timer_running` | 4 | `{"entry": <entry object>}`, the timer that is running |
+| `offline` | 6 | `{"synced": n, "pending": n}` |
+| `ambiguous_selector` | 3 | `{"selector": "...", "candidates": [<task items>]}` |
+| `not_found` | 3 | `{"selector": "...", "elsewhere": [<task items>]}`, matches from other projects in the context (§3.1), `[]` if none |
+| `invalid_time` | 2 | `{"input": "..."}` |
+| `confirmation_required` | 2 | `{"flag": "--yes"}` |
+| `database_too_new` | 5 | `{"database_version": n, "supported_version": n}` |
+| `database_unusable` | 5 | `{"path": "..."}`, the database file |
+
+Every other error code in the table above has `"details": null`: `usage`, `cancelled`, `no_timer_running`, `sync_busy`, `not_initialised`, `no_token`, `access_denied` and `internal`. `schema_mismatch` is `null` for now; what it should carry depends on how §5 checks the Notion schema. `internal` never includes a stack trace or an underlying cause.
+
+The per-entry codes inside a `sync` result (`rate_limited`, `server_error`, `task_not_found`, `row_missing`, `bad_request`; §6.4) describe one entry's outcome, not a failed command, and never become an exit code. `sync_partial` (exit 1) is not an error document: `sync` finished and writes its normal result to stdout.
 
 **Previewing and bounding output.** `sync --dry-run` and `delete --dry-run` report what would happen without changing anything. `list --limit N` bounds output size. Every command has `--help` text with examples.
 

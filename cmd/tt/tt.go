@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"github.com/aims519/timetrack-notion/internal/cli"
+	"github.com/aims519/timetrack-notion/internal/clierr"
 )
 
 func main() {
@@ -13,7 +15,10 @@ func main() {
 	}
 }
 
-// TODO add other exit codes as per §8 of DESIGN.md
 func exitCode(err error) int {
-	return 1
+	var cliError *clierr.Error
+	if errors.As(err, &cliError) {
+		return cliError.Code.ExitCode()
+	}
+	return clierr.Internal.ExitCode() // unknown internal error
 }

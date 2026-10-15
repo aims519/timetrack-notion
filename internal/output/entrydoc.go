@@ -8,6 +8,5 @@ type EntryDoc struct {
 }
 
 func NewEntryDoc(e Entry, w []Warning) EntryDoc {
-	w = normaliseWarnings(w)
-	return EntryDoc{BaseSchema: BaseSchema{SchemaVersion}, Entry: e, Warnings: w}
+	return EntryDoc{BaseSchema: BaseSchema{SchemaVersion}, Entry: e, Warnings: ensureNotNil(w)}
 }

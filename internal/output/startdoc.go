@@ -9,6 +9,5 @@ type StartDoc struct {
 }
 
 func NewStartDoc(e Entry, stopped *Entry, w []Warning) StartDoc {
-	w = normaliseWarnings(w)
-	return StartDoc{BaseSchema: BaseSchema{SchemaVersion}, Entry: e, Stopped: stopped, Warnings: w}
+	return StartDoc{BaseSchema: BaseSchema{SchemaVersion}, Entry: e, Stopped: stopped, Warnings: ensureNotNil(w)}
 }

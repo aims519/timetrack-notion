@@ -17,13 +17,11 @@ type DeleteDoc struct {
 }
 
 func NewDeleteDoc(dryRun bool, a DeleteAction, e Entry, w []Warning) DeleteDoc {
-	w = normaliseWarnings(w)
-
 	var removed *bool
 	// True if action is remove. Nil on dry run
 	if !dryRun {
 		removed = new(a == DeleteActionRemove)
 	}
 
-	return DeleteDoc{BaseSchema: BaseSchema{SchemaVersion}, DryRun: dryRun, Action: a, Entry: e, Removed: removed, Warnings: w}
+	return DeleteDoc{BaseSchema: BaseSchema{SchemaVersion}, DryRun: dryRun, Action: a, Entry: e, Removed: removed, Warnings: ensureNotNil(w)}
 }

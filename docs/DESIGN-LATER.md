@@ -36,11 +36,7 @@ The commands that change entries (`stop`, `add`, `edit`, `delete`, `attach`, and
 
 `result` is one of `synced`, `pending` (offline, timed out or stopped early), `failed`, `blocked`, `waiting` (no task attached), or `disabled`. `pending` in the object is the number of entries still waiting to be pushed after the attempt. Details of any problem go in `warnings`, with the code `sync_note`. Delete's `sync` object reports the archive of the Notion row.
 
-**JSON contract changes.** The `sync` key is added to the documents of `start` (`null` unless `--switch`), `stop`, `add`, `attach`, `edit` and `delete` (`null` with `--dry-run`). `"sync": null` means the command never syncs; a `sync` object with `"attempted": false` means it would have but did not. Adding the key is backwards-compatible. The `tt start --switch` example gains:
-
-```
- "sync": {"attempted": true, "result": "synced", "pending": 0},
-```
+**JSON contract changes.** The `sync` key is added to the documents of `start` (`null` unless `--switch`), `stop`, `add`, `attach`, `edit` and `delete` (`null` with `--dry-run`). `"sync": null` means the command never syncs; a `sync` object with `"attempted": false` means it would have but did not. Adding the key is backwards-compatible, and it follows §8's rule that keys are never missing (`null` when unused).
 
 **Control.**
 - Setting `auto_sync` (boolean, default `true`) and `auto_sync_timeout` (duration, default `5s`); see §4 of this file.
@@ -82,13 +78,12 @@ kubectl-style contexts, each pointing at a Notion workspace/project set.
 
 A context's data is deleted explicitly, in one transaction, by `context delete`. The `id` is also the name of the context's keychain entry (§3 of this file).
 
-**The default context.** The first command to run against a database with no contexts creates one named `default` and makes it current. This happens after the migrations, inside a `BEGIN IMMEDIATE` transaction that re-checks the table, so two processes starting at the same time create one. (v1 instead has the first migration insert its single row. When contexts arrive, a migration adds `name` and `is_current` to that row, naming it `default`.)
+**The default context.** v1's first migration already inserts the single context row. When contexts arrive, a migration adds `name` and `is_current`, naming that row `default` and making it current, so existing entries keep their context.
 
 **Which context `init` configures.** In order: the context named by `--context`, if it exists; otherwise the local-only `default` context, which is adopted and renamed to the `--context` name if one was given (it keeps its ID and entries); otherwise a new context is created. Without `--context`, it configures the current context. Running `init` again on a connected context is safe: it re-detects and reuses what exists.
 
 **JSON.** `status` returns `context` (`id`, `name`, `connected`) in place of v1's `connected`. The `context` and `project` commands return the affected objects under `contexts`, `context`, `projects` or `project`; their fields are fixed when those commands are built. Destructive commands that require `--yes` include `context delete`.
 
-**Implementation notes.** Test two processes starting at once against a fresh database: one `default` context.
 
 ## 3. OS keychain
 
@@ -106,7 +101,14 @@ Token lookup order: `NOTION_TOKEN` environment variable, then the OS keychain, b
 |---|---|
 | `tt config list \| get <key> \| set <key> <value>` | Reads and writes the global settings. `set` validates the value: an unknown key, a malformed duration, or an unknown timezone fails with `usage` (exit 2). Supports `--output json`. |
 
-**settings** (global, not per context), managed with `tt config`. One row per key (`key` primary key, `value` text); a key without a row has its default. `tt config set` validates before it writes.
+**settings** (global, not per context), managed with `tt config`. A key without a row has its default; `tt config set` validates before it writes.
+
+| Column | Notes |
+|---|---|
+| `key` | PK. |
+| `value` | Text. |
+
+Keys:
 
 - `stale_timer_threshold`: a duration, default `12h`. `status` warns when the running timer is older than this. (v1 hardcodes 12h.)
 - `timezone`: an IANA zone name such as `Europe/London`, defaulting to the system zone. The `TT_TIMEZONE` environment variable overrides it for a single run, which suits agents and containers (usually UTC). (v1 has `TT_TIMEZONE` and the system zone only.)
@@ -161,9 +163,9 @@ Tasks with `gone_at` set are excluded from name matching.
 
 ## 7. `sync --dry-run` and the schema check
 
-**Touches:** §3.3, §5, §6.3, §6.4, §8 (`schema_mismatch`).
+**Touches:** §3.3, §5, §6.3, §6.4, §8 (the `sync` document, `schema_mismatch`).
 
-`tt sync --dry-run` reports what would be pushed, updated, archived or skipped, without writing to Notion or changing local state. In table output the status words become `would push`, `would update` and `would archive`, and nothing is sent. In JSON the document has `"dry_run": true` and the states are `would_push`, `would_update` and `would_archive`. `--dry-run` always exits 0.
+`tt sync --dry-run` reports what would be pushed, updated, archived or skipped, without writing to Notion or changing local state. In table output the status words become `would push`, `would update` and `would archive`, and nothing is sent. In the JSON `sync` document (§8), a `dry_run` key is added (`false` on a normal run), and with `--dry-run` each result's `state` is `would_push`, `would_update` or `would_archive`, with `error` `null`. `--dry-run` always exits 0.
 
 `sync` re-validates the entries database schema before pushing, so renamed or deleted properties produce a clear error instead of a cryptic API failure.
 

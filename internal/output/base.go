@@ -11,3 +11,10 @@ const SchemaVersion = 1
 type BaseWarnings struct {
 	Warnings []Warning `json:"warnings"`
 }
+
+func normaliseWarnings(w []Warning) []Warning {
+	if w == nil {
+		w = []Warning{}
+	}
+	return w
+}

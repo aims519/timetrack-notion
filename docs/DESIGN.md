@@ -4,6 +4,29 @@ A small Go CLI for tracking time against tasks. It works fully offline, stores t
 
 Status: design draft, v1 scope. Binary name `tt` is a placeholder. Deferred features are in [DESIGN-LATER.md](DESIGN-LATER.md); open questions and past decisions are in §11.
 
+## Contents
+
+- [1. Scope](#1-scope)
+- [2. Concepts](#2-concepts)
+- [3. Commands](#3-commands)
+  - [3.1 Timer](#31-timer)
+  - [3.2 Entries](#32-entries)
+  - [3.3 Sync](#33-sync)
+  - [3.4 Setup and tasks](#34-setup-and-tasks)
+- [4. Data model](#4-data-model)
+- [5. Notion setup and `init`](#5-notion-setup-and-init)
+- [6. Sync](#6-sync)
+  - [6.1 What is pushed](#61-what-is-pushed)
+  - [6.2 Idempotency](#62-idempotency)
+  - [6.3 Failure handling](#63-failure-handling)
+  - [6.4 Output and exit codes](#64-output-and-exit-codes)
+  - [6.5 Sync lock and scheduled sync](#65-sync-lock-and-scheduled-sync)
+- [7. Command errors vs sync failures](#7-command-errors-vs-sync-failures)
+- [8. Agent-friendly interface](#8-agent-friendly-interface)
+- [9. Secrets](#9-secrets)
+- [10. Implementation notes](#10-implementation-notes)
+- [11. Decision log and open questions](#11-decision-log-and-open-questions)
+
 ## 1. Scope
 
 **In v1:**

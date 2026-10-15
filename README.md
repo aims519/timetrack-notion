@@ -16,12 +16,11 @@ Design draft. There is no working code yet, and nothing here is installable. The
 - Log time after the fact, including backdated starts and stops
 - Work from the first run, before any Notion setup, and connect to Notion later without losing anything already recorded
 - Push finished entries to Notion safely, so a retry never creates duplicates
-- Keep separate contexts for different Notion workspaces
 - Give clean JSON output, so scripts and AI agents can drive it
 
 ## Design
 
-The full design is in [docs/DESIGN.md](docs/DESIGN.md), which is the source of truth for how this should behave.
+The full design is in [docs/DESIGN.md](docs/DESIGN.md), which is the source of truth for how this should behave. Features deferred from the first version, such as automatic sync and multiple Notion workspaces, are in [docs/DESIGN-LATER.md](docs/DESIGN-LATER.md).
 
 ## Licence
 

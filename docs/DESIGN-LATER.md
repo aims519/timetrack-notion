@@ -186,3 +186,9 @@ Tasks with `gone_at` set are excluded from name matching.
 `tt init` gains `--add-rollup | --no-add-rollup`, and step 5 becomes:
 
 Offer to add a **rollup** on the tasks database (e.g. `Tracked (min)`: sum of `Minutes` via the entries relation). The API can create the rollup, as it can the `Minutes` formula (verified in the spike); because the rollup is added to the user's own tasks database, it is offered and never added without asking. Detection is structural (a rollup through that relation, over `Minutes`, with `sum`), not by name. An existing property is never modified; a name clash with a different shape offers a different name or skipping. Declining prints manual steps, and nothing in the tool depends on the rollup.
+
+## 10. Indented JSON output
+
+**Touches:** §3 (global flags), §8 (Conventions).
+
+v1 prints JSON compactly, on one line. A flag such as `--indent` (or an `--output json-pretty` value) would print the same document indented, for reading by eye. It changes formatting only, never the content, so the JSON contract is unaffected. Until then, pipe the output through `jq`.

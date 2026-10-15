@@ -2,526 +2,485 @@
 
 A small Go CLI for tracking time against tasks. It works fully offline, stores tracked times along with a read-only cache of associated Notion tasks/projects in a local SQLite database, and syncs completed entries to Notion.
 
-Status: design draft, v1 scope. Binary name `tt` is a placeholder. Features deferred from v1 are described in [DESIGN-LATER.md](DESIGN-LATER.md). Open questions are in §11.
+Status: design draft, v1 scope. Binary name `tt` is a placeholder. Deferred features are in [DESIGN-LATER.md](DESIGN-LATER.md); open questions and past decisions are in §11.
 
 ## 1. Scope
 
 **In v1**
 
-- Start/stop a single timer, with or without a task.
-- Log time after the fact: `add` for a finished entry, and backdated `start` / `stop` via `--at` / `--ago`.
-- Attach tasks to entries after the fact; edit and delete entries.
+- Start/stop a single timer, with or without a task; log time after the fact (`add`, backdated `start`/`stop`).
+- Attach tasks to entries later; edit and delete entries.
 - Choose a task by page ID, short ID or order number, or from an interactive picker.
 - Inspect the running timer (`status`) and past entries (`list`).
-- Use it from the first run: timing works before any setup, and `init` later connects it to Notion without losing what was recorded (§4).
-- Push stopped, task-attached entries to Notion (`sync`) idempotently, with retries, one sync at a time (§6.5).
-- First-run setup (`init`).
+- Time from the first run; `init` connects to Notion later without losing anything (§4).
+- Push stopped, task-attached entries to Notion (`sync`) idempotently, with retries, one sync at a time.
 
-**Not in v1**
+**Not in v1:** pulling Notion edits back down (entries are push-only; tasks are a read-only cache); multiple users, reports, invoicing, a TUI or web UI, a daemon; syncing a running timer.
 
-- Pulling edits made in Notion back down to local entries. (Task names/status are pulled read-only into a cache; entries are push-only.)
-- Multiple users, reports, invoicing, a TUI or web UI, a background daemon.
-- Syncing a running timer.
+**Deferred** ([DESIGN-LATER.md](DESIGN-LATER.md)): automatic sync after changes; multiple contexts and the OS keychain; `tt config`; `HH:MM` meaning yesterday and full DST handling; task name matching; `sync --dry-run` and the schema check; `sync --strict`; the rollup offer in `init`; an option to indent JSON output.
 
-**Deferred to [DESIGN-LATER.md](DESIGN-LATER.md)**
-
-- Automatic best-effort sync after commands that change entries.
-- Multiple contexts (several Notion workspaces) and the OS keychain.
-- `tt config` and the settings table (v1 hardcodes the defaults).
-- `HH:MM` meaning yesterday, `--end HH:MM` across midnight, and full daylight-saving handling.
-- Matching tasks by words from their name, cross-project matches on `not_found`, and "did you mean" suggestions.
-- `sync --dry-run` and the entries-database schema check.
-- `sync --strict`.
-- The rollup offer in `init`.
-
-**Stretch**
-
-- `tt import <toggl.csv>`: backfill Toggl history as unattached entries, to be attached later.
-- `sync --push-unattached`.
-- An opt-in semantic task matcher (local embedding model, suggestions only). See DESIGN-LATER.md.
+**Stretch:** `tt import <toggl.csv>` (backfill Toggl history as unattached entries); `sync --push-unattached`; an opt-in semantic task matcher.
 
 ## 2. Concepts
 
 | Term | Meaning |
 |---|---|
 | **Entry** | A time span: `start`, `end` (null while running), optional `description`, optional `task`. Identified by a locally generated UUID. |
-| **Task** | A page in the Notion tasks database. Identified by its Notion page ID; names and order numbers are display hints only and are not unique. |
-| **Context** | The configuration, stored in the same SQLite database as the entries it owns: tasks/projects/entries databases, property mapping, default project. v1 has exactly one, identified by a stable generated ID. It is either **connected** to Notion or **local-only**; it starts local-only, and `init` connects it (§4). |
-| **Project** | A page in the Notion projects database; tasks relate to it. Used to scope task selection. |
+| **Task** | A page in the Notion tasks database, identified by its page ID. Names and order numbers are display hints and not unique. |
+| **Project** | A page in the Notion projects database. Tasks relate to it; it scopes task selection. |
+| **Context** | The Notion configuration (databases, property mapping, default project), stored with the entries. v1 has exactly one. It is **local-only** until `init` **connects** it. |
+| **Sync state** | Per entry: `pending`, `synced`, `failed` (temporary Notion error, retried next run, counted as pending by `status`) or `blocked` (permanent problem, needs fixing). A stopped entry with no task is **waiting**; this is derived, not stored. |
 
 Only **one timer runs at a time**.
 
 ## 3. Commands
 
-Global flags: `--output table|json` selects the output format (default `table`); `--no-input` disables all prompts; `--yes` confirms destructive actions without asking. Exit codes are global and stable; see §8.
+Global flags: `--output table|json` (default `table`), `--no-input` (never prompt), `--yes` (confirm destructive actions). Exit codes: §8.
 
 ### 3.1 Timer
 
 | Command | Behaviour |
 |---|---|
-| `tt start [description] [-t, --task SELECTOR \| --pick] [--switch] [--at TIME \| --ago DURATION]` | Starts a timer. Requires a description, a task (`--task` or `--pick`), or both; bare `tt start` is an error. The start timestamp is captured first, before any lookup or picker; with `--at` or `--ago` it is the given time instead (never in the future; see Time arguments below). Errors if a timer is already running, naming it. With `--switch`, stops the running timer and starts the new one using the same timestamp, in one transaction (with `--at` / `--ago`, the old entry ends at that time, which must be after the old entry's start). The task is resolved before the transaction opens, so a failed lookup or a cancelled picker leaves the old timer running. Prints the new entry's ID. In a local-only context, `--task` and `--pick` fail with `not_initialised`; a description works. |
-| `tt stop [--at TIME \| --ago DURATION]` | Stops the running timer. `--at` and `--ago` are mutually exclusive; the end must be after the entry's start and not in the future. Prints the closed entry, including its ID and duration. |
-| `tt status` | Shows the running entry (label, elapsed, start time, description), today's total, and counts of pending / blocked / waiting entries. Warns if the timer has run implausibly long (more than 12 hours). In a local-only context it adds one line, `not connected to Notion yet; run 'tt init'`. Always exits 0, including before `init`. |
+| `tt start [description] [-t, --task SELECTOR \| --pick] [--switch] [--at TIME \| --ago DURATION]` | Needs a description, a task, or both. Fails with `timer_running` if a timer is running, unless `--switch`, which stops it and starts the new one at the same instant in one transaction (with `--at`/`--ago`, that instant must be after the old entry's start). The start time is captured before any lookup or picker, so time spent choosing isn't lost; the task is resolved before the transaction, so a failed lookup or cancelled picker leaves the old timer running. |
+| `tt stop [--at TIME \| --ago DURATION]` | Stops the running timer. Prints the closed entry. |
+| `tt status` | Running entry, elapsed time, today's total, and pending / blocked / waiting counts. Warns if the timer has run over 12 hours, and says so if the context isn't connected. Always exits 0. |
 
-**Time arguments** (`--at`, `--ago`, `--start`, `--end`, `--duration`): `--at`, `--start` and `--end` accept `HH:MM` or an RFC 3339 timestamp; `--ago` and `--duration` accept durations such as `10m` or `1h30m`. No time may be in the future, and an end must be after its start; otherwise the command fails with `invalid_time` (exit 2). Entries that overlap existing entries are allowed, but the overlap is reported as a warning (see §8).
+**Time arguments.** `--at`, `--start`, `--end` take `HH:MM` or RFC 3339; `--ago`, `--duration` take durations (`10m`, `1h30m`). No time may be in the future and an end must follow its start, else `invalid_time` (exit 2). Overlapping entries are allowed, with an `overlap` warning.
 
-An `HH:MM` always means **today**, in the local zone (below). If that moment has not happened yet, the command fails with `invalid_time`; for any earlier day, including a timer left running overnight, use an RFC 3339 timestamp. This applies to `--end` too, so an entry that crosses midnight is given with RFC 3339 timestamps. On the two daylight-saving change days, an `HH:MM` that does not exist (spring forward) or occurs twice (autumn) also fails with `invalid_time`, and the message says to use an RFC 3339 timestamp with an offset.
+`HH:MM` always means **today** in the local zone: a time not yet reached is `invalid_time`, so anything earlier (a timer left overnight, an entry across midnight) needs RFC 3339. On DST change days a non-existent or repeated `HH:MM` is also `invalid_time`, with a hint to pass an offset.
 
-**Time zone.** Times are stored in UTC. `HH:MM` input, table output, and the "today" and `--week` boundaries of `list` use the local zone: the system zone, or the zone named by the `TT_TIMEZONE` environment variable (an IANA name such as `Europe/London`), which suits containers, agents and tests. An unknown zone name fails with `usage` (exit 2). `--week` is the current ISO week, Monday to Sunday. JSON timestamps are always UTC.
+**Time zone.** Stored in UTC; JSON is always UTC. Input, table output and the `list` day/week boundaries use the system zone, or `TT_TIMEZONE` (an IANA name; unknown names are `usage`, exit 2). `--week` is the ISO week, Monday to Sunday.
 
-**Task selector** (the value of `--task` in `start`, `add` and `edit`, and the argument of `attach`; `--all` is accepted wherever `--task` or `--pick` is). A selector is tried against the cached tasks in this order, and the first rule that matches at least one task decides the result:
+**Task selector** (`--task` on `start`, `add`, `edit`; the argument of `attach`). The first rule that matches anything decides:
 
-1. The **full page ID**, with or without dashes.
-2. A **short ID**: a suffix of the Notion page ID, at least 6 characters, as shown in the picker and in `tt task list`. (Pages created around the same time share long ID prefixes, so prefixes don't distinguish tasks; suffixes do. The displayed short ID is the shortest suffix of at least 6 characters that is unique within the cache.) ID matching runs against the whole task cache, not just the current project: page IDs are globally unique, so there is no ambiguity, and it still works after the default project changes.
-3. An **order number** such as `4.1`, matched within the current project's open tasks (done tasks too, with `--all`). It is accepted only if exactly one of those tasks has that order; if several do, it is ambiguous. (Short IDs are at least 6 characters, so they are not mistaken for order numbers.)
+1. **Full page ID**, with or without dashes.
+2. **Short ID**: a suffix of the page ID, at least 6 characters (pages created together share prefixes, not suffixes). Displayed as the shortest unique suffix in the cache.
+3. **Order number** such as `4.1`, among the current project's open tasks.
 
-A full or short ID always resolves, whether or not the task is done. v1 does not match on words from the task name; anything that is not an ID or an order number is `not_found`.
+IDs match the whole cache, done tasks included. Order numbers and the picker cover only the current project's open tasks; `--all` adds done tasks. Anything else is `not_found` (exit 3); there is no name matching in v1. Several matches prompt (interactive) or fail with `ambiguous_selector` (exit 3) listing candidates. Tasks marked gone (§4) never match.
 
-If several tasks match, ask which one (interactive), or fail with `ambiguous_selector` (exit 3) listing the candidates with short IDs (non-interactive; see §8). `--task` always takes a value; a bare `--task` is a usage error. **`--pick`** is a separate flag, accepted by `start`, `add` and `edit`, with no short form, that opens an interactive picker over the current project's open tasks, sorted by Order, then name (tasks with no Order last). `--pick` and `--task` are mutually exclusive, and without a terminal `--pick` is a usage error (exit 2). The picker, like any lookup, runs before anything is written, and the start timestamp of `start` is captured before it opens, so time spent choosing is not lost. **Cancelling the picker (Esc or Ctrl-C) changes no data**: no entry is created, edited or started, a running timer (including the one `--switch` would have stopped) is left exactly as it was, and the command exits 2 with `cancelled`. `--all` includes done tasks in the picker. A selector must resolve to a cached task; otherwise it fails with `not_found` (exit 3). In a local-only context there is no task cache at all, so every selector, and the picker, fails with `not_initialised` (exit 5).
+`--pick` opens a picker over the current project's open tasks, sorted by Order, then name, unordered last. It is mutually exclusive with `--task` and a usage error without a terminal; `--task` always needs a value. **Cancelling the picker changes nothing** and exits 2 (`cancelled`).
 
-**The resolved task is always echoed** (name and short ID) in the output of `start`, `attach`, `add` and `edit`, and in their JSON, so a wrong match is visible immediately and can be undone with `--switch` or `edit`.
+The resolved task is always echoed (name and short ID), so a wrong match is seen at once. Scripts and agents should use full page IDs from `tt task list --output json`.
 
-**Agents.** Order numbers and the picker are for people. Scripts and agents should resolve tasks with `tt task list --output json` and pass full page IDs; the agent documentation and the planned Claude skill say so.
+**Task refresh.** Resolving a selector refreshes the task cache if it is older than 10 minutes: incremental, blocking, capped at 2s. On timeout or error it uses the cache, says so, and skips blocking refreshes for a minute, so working offline stays fast.
 
-**Task refresh when resolving a selector** (`start`, `add`, `edit`, `attach`): if the task cache is older than its TTL (default 10 min), do a blocking incremental refresh (tasks edited since the last refresh), capped at 2s. On timeout or error, fall back to the cache, print one line saying so, and record the failure (`cache_state.tasks_refresh_failed_at`); further blocking refreshes are skipped for the next minute, so an offline `start` is not delayed by 2s every time. A fresh cache makes no network call.
+In a local-only context there is no task cache: selectors and `--pick` fail with `not_initialised` (exit 5).
 
 ### 3.2 Entries
 
 | Command | Behaviour |
 |---|---|
-| `tt list [filters] [--limit N] [--wide]` | Defaults to today's entries (local time), chronological. Filters: `--week`, `--since/--until YYYY-MM-DD`, `--task`, `--project`, `--unattached`, `--unsynced`. An entry spanning midnight belongs to the day it started. Long names are truncated to terminal width unless `--wide`. |
-| `tt attach [selector] [--entry ID]` | Links a task to an entry: the running entry, else the most recent one, unless `--entry` is given. With no selector it opens the picker (interactive only; without a terminal a selector is required; cancelling changes nothing, as for `--pick`). Bare `tt attach` is the everyday form; `--entry` and an explicit selector are for older entries and for scripts and agents. Needs a connected context (`not_initialised` otherwise). |
-| `tt edit <entry> [--description] [--start] [--end] [--task SELECTOR \| --pick]` | Edits an entry. If it was already synced, it becomes pending again and the existing Notion row is updated on the next sync. Editing or re-attaching a `blocked` entry makes it pending again. `--end` cannot be set on a running entry (use `stop --at`). `--task` and `--pick` change the task; v1 has no way to detach one (delete the entry instead). |
-| `tt delete <entry> [--yes] [--dry-run]` | Marks the entry deleted locally (tombstone); the next `sync` archives its Notion row. An entry is removed outright only if no create was ever attempted for it (`create_attempted_at` is null, §4). Otherwise, including after a cancelled or timed-out create, it is tombstoned, because a Notion row may exist without the local page ID having been recorded. Deleting the running entry removes it and frees the timer. `--dry-run` reports which of the two would happen, without changing anything. |
-| `tt add [description] [-t, --task SELECTOR \| --pick] (--start T [--end T \| --duration D] \| --end T --duration D \| --duration D)` | Logs a finished entry directly, without touching the running timer. The span is given as any of: `--start` and `--end`; `--start` and `--duration`; `--end` and `--duration`; or `--duration` alone or `--start` alone (the entry then ends now). Like `start`, it needs a description, a task (`--task` or `--pick`), or both. With a task it is pending sync immediately; without one it is "waiting". Prints the new entry, including its ID. |
+| `tt list [--week \| --since/--until DATE] [--task S] [--project P] [--unattached] [--unsynced] [--limit N] [--wide]` | Today's entries by default, chronological. An entry belongs to the day it started. `--wide` stops truncation. |
+| `tt attach [selector] [--entry ID]` | Links a task to the running entry, else the most recent one, or `--entry`. With no selector it opens the picker (so a selector is required without a terminal). Needs a connected context. |
+| `tt edit <entry> [--description] [--start] [--end] [--task S \| --pick]` | Any change makes the entry `pending`, including a `blocked` one; a synced entry's Notion row is updated next sync. `--end` can't be set on a running entry (use `stop --at`). No detaching a task in v1. |
+| `tt delete <entry> [--yes] [--dry-run]` | Removed outright only if no Notion create was ever attempted (`create_attempted_at` null); otherwise tombstoned, and the next sync archives the row. `--dry-run` says which, changing nothing. Deleting the running entry frees the timer. |
+| `tt add [description] [-t S \| --pick] <span>` | Logs a finished entry without touching the timer. Span: `--start`+`--end`, `--start`+`--duration`, `--end`+`--duration`, or `--duration` or `--start` alone (ending now). Needs a description, a task, or both. |
 
-Entries are displayed with the description if present, otherwise the task name; unattached entries are flagged. Descriptions are limited to 2000 characters (a Notion text limit); longer ones fail with `usage` (exit 2).
-
-**Entry IDs.** An entry is selected by a unique prefix of its UUID, at least 7 characters (entry UUIDs are random, so prefixes work, unlike task page IDs). Entry IDs are shown in `list`, printed by `start` and `stop`, and included in every JSON response.
+Entries display their description, else the task name. Descriptions are at most 2000 characters (a Notion limit), else `usage`. An entry is selected by a unique UUID prefix of at least 7 characters.
 
 ### 3.3 Sync
 
-`tt sync [--retry-blocked]`. See §6. It takes the sync lock for the whole run (§6.5). In a local-only context `sync` fails with `not_initialised`.
-
-Nothing syncs automatically in v1: entries are pushed when `tt sync` runs, by hand or from a scheduled job (§6.5).
+`tt sync [--retry-blocked]`: see §6. Needs a connected context. Nothing syncs automatically in v1; run it by hand or on a schedule (§6.5).
 
 ### 3.4 Setup and tasks
 
 | Command | Behaviour |
 |---|---|
-| `tt init [--tasks-db ID] [--projects-db ID] [--parent-page ID] [--project NAME]` | Connects the context to Notion; see §5. It is optional for timing, which works from the first run. A local-only context is connected in place, keeping its ID and every entry already recorded. Every prompt has a flag equivalent, so it runs with `--no-input`. The token is never accepted as a flag (it would end up in shell history): supply it via `NOTION_TOKEN` (§9). Safe to re-run: existing resources are detected and reused, never duplicated. |
-| `tt task list [--project NAME] [--all] [--limit N]` | Lists cached tasks (default: the current project's open tasks, sorted by Order, then name, with tasks that have no Order last) with order, short ID and name. This is how scripts and agents discover task IDs. `--all` includes done tasks. |
-| `tt task refresh [--full]` | Refreshes the task cache now, ignoring the TTL, the 2s cap and any back-off. `--full` fetches everything, which also detects deleted or archived tasks. |
-
-The default project is chosen by `init` (`--project`), and re-running `init` changes it.
+| `tt init [--tasks-db ID] [--projects-db ID] [--parent-page ID] [--project NAME]` | Connects the context to Notion (§5). Every prompt has a flag. Safe to re-run; also how the default project is changed. |
+| `tt task list [--project NAME] [--all] [--limit N]` | Cached tasks with order, short ID and name; open tasks in the current project by default, `--all` adds done tasks. How scripts discover task IDs. |
+| `tt task refresh [--full]` | Refreshes now, ignoring TTL and back-off. `--full` also detects deleted or archived tasks. |
 
 ## 4. Data model
 
-Everything lives in **one SQLite database** (pure-Go driver, no cgo) in the user data directory (for example `~/.local/share/tt/` on Linux). `TT_DB` overrides the path, which suits tests, containers and agents. There is deliberately no separate config file: the context and entries are in the same file, so they cannot drift apart, losing or replacing a config file cannot orphan entries from the context that owns them, and one backup covers everything. Tokens are never stored in the database (§9).
+One **SQLite database** (pure-Go driver) in the user data directory, overridden by `TT_DB`. There is no config file: the context lives in the same database as the entries, so they can't drift apart and one backup covers both. Tokens are never stored (§9).
 
-There are six tables: `contexts`, `entries`, `tasks`, `projects`, `cache_state` and `schema_migrations`. Every table that belongs to a context carries a `context_id` that references `contexts(id)`. v1 has a single context, but the column stays so that adding contexts later needs no migration of the other tables. Foreign keys are enforced (`PRAGMA foreign_keys = ON` on every connection). If the database is lost, `init` can rebuild the context, since it detects the Notion resources that already exist; only entries that had not yet synced are gone.
+Tables: `contexts`, `entries`, `tasks`, `projects`, `cache_state`, `schema_migrations`. Context-owned tables carry `context_id` (a foreign key to `contexts.id`), so adding contexts later needs no migration of them. Foreign keys are on; WAL mode with a busy timeout lets a command run while a sync does. **Every command commits locally before any network call, and no transaction spans one.** If the database is lost, `init` rebuilds the context from Notion; only unsynced entries are lost.
 
-Several `tt` processes can touch the file at once (for example a sync in one terminal while a command runs in another), so the database is opened in WAL mode with a busy timeout. **Every command commits its change locally before any network call**, and no transaction is ever held across one.
+Each table is listed as **Column | Notes**. A `*` after a column name marks it **nullable**; every other column is `NOT NULL`. PK is primary key, FK is foreign key. Timestamps are UTC.
 
 **contexts** (exactly one row in v1)
 
 | Column | Notes |
 |---|---|
-| `id` | UUID generated when the row is created, never changed. Primary key. |
-| `tasks_db_id`, `projects_db_id`, `entries_db_id` | The Notion data-source IDs. Null until `init` connects the context. |
-| `property_map` | JSON: the names of the task name, project relation, order and done properties. Null until `init`. |
-| `default_project_page_id` | The default project; null if none. |
+| `id` | PK. UUID, never changed. |
+| `tasks_db_id`* | Notion data-source ID of the tasks database. Null until `init`. |
+| `projects_db_id`* | Notion data-source ID of the projects database. Null until `init`. |
+| `entries_db_id`* | Notion data-source ID of the Time entries database. Null means **local-only**; there's no separate flag. |
+| `property_map`* | JSON: the names of the task name, project, order and done properties. Null until `init`. |
+| `default_project_page_id`* | Null if no default project. |
 | `created_at` | |
 
-**The context row.** The first migration inserts the single context row, local-only. Each migration re-checks the schema version inside its own `BEGIN IMMEDIATE` transaction, so two processes starting at the same time apply it once and create one row. Its Notion columns are null (`entries_db_id IS NULL`), and that is what **local-only** means; there is no separate flag to fall out of step. So `tt start "reading"` works the first time the binary runs.
+The first migration inserts the single row, local-only. Each migration re-checks the schema version under `BEGIN IMMEDIATE`, so concurrent first runs create one row.
 
-What works while the context is local-only: `start` and `stop`, `add`, `edit`, `delete` and `list` with descriptions, and `status`, which exits 0 and says so. What needs Notion fails with `not_initialised` (exit 5) and a hint to run `tt init`: `--task`, `--pick`, `attach`, `task` and `sync`. Entries recorded meanwhile have no task, so they are `waiting`. When `init` connects the context (§5) it keeps the context's ID, so nothing is migrated or copied: the earlier entries are simply there, and `attach --entry` links them to tasks afterwards.
+While local-only, `start`, `stop`, `add`, `edit`, `delete`, `list` and `status` work with descriptions; `--task`, `--pick`, `attach`, `task` and `sync` fail with `not_initialised` (exit 5). `init` keeps the context's ID, so earlier entries simply remain, waiting to be attached.
 
 **entries**
 
 | Column | Notes |
 |---|---|
-| `id` | UUID, generated when the entry is created; stored in Notion as `Local ID`, which is the idempotency key. Not a Notion page ID. |
-| `context_id` | The owning context's ID; foreign key to `contexts(id)`. |
-| `start_utc`, `end_utc` | `end_utc` null while running; display in local time. Stored with full precision (seconds); truncated to the minute only when pushed to Notion (§5) |
-| `description` | nullable |
-| `task_page_id` | The task this time is *for*: a page in the tasks database. Becomes the `Task` relation on the entry's Notion row. Null while the entry is unattached. |
-| `entry_page_id` | This entry's *own* row in the Time entries database. Used to update or archive the row on later syncs. Null until the first successful push. |
-| `create_attempted_at` | Set, and committed, just before the first request to create the entry's Notion row. If it is set while `entry_page_id` is null, a row may exist that the tool has no record of: sync resolves this by looking up `Local ID` (§6.2), and `delete` tombstones the entry instead of removing it. |
-| `sync_state` | `pending`, `synced`, `failed`, `blocked`. The single source of truth for what a sync does next. Every change a command makes sets it to `pending` (including editing or re-attaching a `blocked` entry). `failed` entries are retried on the next sync and counted as pending by `status`. |
-| `sync_error` | last error message |
-| `updated_at`, `synced_at` | `updated_at` is bumped by every change; `synced_at` is when the last push succeeded. A sync marks an entry `synced` only if its `updated_at` is unchanged since the sync read it (§6.3). |
-| `deleted_at` | tombstone |
+| `id` | PK. UUID; sent to Notion as `Local ID`, the idempotency key. |
+| `context_id` | FK to `contexts.id`. |
+| `start_utc` | Full precision; truncated to the minute only when sent (§5). |
+| `end_utc`* | Null while running. Full precision, as for `start_utc`. |
+| `description`* | At most 2000 characters. |
+| `task_page_id`* | The task this time is for; null while unattached. Deliberately not an FK: a task can vanish from Notion and its entries must survive (they become `blocked`). |
+| `entry_page_id`* | The entry's own Notion row; null until first pushed. |
+| `create_attempted_at`* | Committed just before the first create request. Set with no `entry_page_id` means a row may exist unrecorded: sync looks it up by `Local ID` (§6.2), and `delete` tombstones. |
+| `sync_state` | `pending`, `synced`, `failed` or `blocked` (§2). Every change sets `pending`. |
+| `sync_error`* | The last sync error. |
+| `updated_at` | Bumped by every change. Sync marks an entry `synced` only if this hasn't changed since it read the entry (§6.3). |
+| `synced_at`* | When the last push succeeded. |
+| `deleted_at`* | Tombstone. |
 
-A **partial unique index on a constant expression** makes two running timers unrepresentable:
+One running timer is enforced by a partial unique index on a constant (indexing a nullable column wouldn't work, as SQLite treats NULLs as distinct):
 
 ```
 CREATE UNIQUE INDEX one_running ON entries ((1))
   WHERE end_utc IS NULL AND deleted_at IS NULL;
 ```
 
-Indexing a nullable column (`end_utc` or `deleted_at`) would not work: SQLite treats NULLs as distinct in a unique index, so every running row would be allowed. A test inserts two running rows and expects the second to fail.
-
-"Waiting" (stopped but unattached) is derived, not stored.
-
-**tasks** (a read-only cache of the tasks database)
+**tasks** (read-only cache of the tasks database)
 
 | Column | Notes |
 |---|---|
-| `context_id`, `page_id` | Primary key together. `page_id` is the Notion page ID, stored without dashes. |
-| `name` | The task title. |
-| `project_page_id` | The project the task belongs to; null if none. |
-| `sort_order` | The Order property as a real number (such as `4.1`); null if unset. Not unique. |
+| `context_id` | PK with `page_id`. FK to `contexts.id`. |
+| `page_id` | PK with `context_id`. Notion page ID, stored without dashes. |
+| `name` | |
+| `project_page_id`* | Null if the task has no project. |
+| `sort_order`* | The Order property as a real number (such as `4.1`). Not unique. |
 | `done` | Boolean. |
 | `last_edited_time` | From Notion; drives incremental refresh. |
-| `gone_at` | Set when a full refresh no longer finds the task in Notion (deleted or archived); cleared if it reappears. Null while the task exists. |
+| `gone_at`* | Set when a full refresh no longer finds the task; cleared if it reappears. |
 
-Short IDs are derived from the set of cached `page_id` values, not stored. Rows with `gone_at` set are kept, so existing entries can still show their task's name, but they are excluded from the picker, `task list` and order-number matching.
+Tasks with `gone_at` set keep their names for display but are excluded from matching, the picker and `task list`. Short IDs are derived from the cached page IDs, not stored.
 
-`entries.task_page_id` is deliberately **not** a foreign key to `tasks`. A task can vanish from Notion while its entries still exist, and entries must survive that: at sync they become `blocked`, never deleted.
-
-**projects** (a read-only cache of the projects database)
+**projects** (read-only cache of the projects database)
 
 | Column | Notes |
 |---|---|
-| `context_id`, `page_id` | Primary key together. |
-| `name` | The project title. |
-| `gone_at` | As for `tasks`. |
+| `context_id` | PK with `page_id`. FK to `contexts.id`. |
+| `page_id` | PK with `context_id`. |
+| `name` | |
+| `gone_at`* | As for `tasks`. |
 
-**cache_state** (one row per context)
+**cache_state** (one row per context; timestamps are null until the first refresh of each kind)
 
 | Column | Notes |
 |---|---|
-| `context_id` | Primary key. |
-| `tasks_refreshed_at` | Time of the last successful refresh. An incremental refresh asks Notion for tasks edited since this time, minus a small overlap to tolerate clock skew. |
-| `tasks_refresh_failed_at` | Time of the last failed or timed-out refresh; blocking refreshes are skipped for a minute after it (§3.1). |
-| `tasks_full_refreshed_at` | Time of the last full refresh (`tt task refresh --full`, or the occasional automatic one). |
-| `projects_refreshed_at` | Time of the last projects refresh. |
+| `context_id` | PK. FK to `contexts.id`. |
+| `tasks_refreshed_at`* | Last successful refresh. Incremental refreshes ask for edits since then, minus a small overlap for clock skew. |
+| `tasks_refresh_failed_at`* | Last failed or timed-out refresh; drives the one-minute back-off (§3.1). |
+| `tasks_full_refreshed_at`* | Last full refresh. |
+| `projects_refreshed_at`* | Last projects refresh. |
 
 **schema_migrations**
 
 | Column | Notes |
 |---|---|
-| `version` | Integer primary key: the migrations applied so far. |
-| `applied_at` | When it was applied. |
+| `version` | PK. |
+| `applied_at` | |
 
-Migrations are forward-only and run automatically at startup, each in a transaction. A database written by a newer version of the tool than the running binary is never modified: the command fails with exit 5 (`database_too_new`) and says to upgrade. A database that cannot be opened or is corrupt fails with exit 5 (`database_unusable`).
+Migrations are forward-only, run at startup, one transaction each. A database from a newer binary is never touched (`database_too_new`, exit 5); an unreadable one is `database_unusable` (exit 5).
 
 ## 5. Notion setup and `init`
 
-Prerequisites: a Notion internal integration, connected to a parent page that contains (or will contain) the projects and tasks databases. An integration only sees pages explicitly shared with it, so sharing the parent page covers everything beneath it. A relation to another database does not grant access to it.
-
-Example layout:
+Needs a Notion internal integration shared on a parent page above the projects and tasks databases (an integration sees only pages shared with it, and a relation doesn't grant access).
 
 ```
-Sabbatical 2026 (page)
-├── Projects         (existing database)
-├── Sabbatical Tasks (existing database)
-└── Time entries     (created by init)
+Parent page (shared with the integration)
+├── Projects       (existing database)
+├── Tasks          (existing database)
+└── Time entries   (created by init)
 ```
 
-`init` configures the context. If it is still local-only it is connected in place, keeping its ID and every entry already recorded. Running `init` again on a connected context is safe: it re-detects and reuses what exists.
+`init` checks before creating anything, so re-running reuses what exists:
 
-`init` does the following, checking before creating anything:
-
-1. Validate the token (cheap "who am I" call). If none is available, fail with `no_token` and a hint to set `NOTION_TOKEN`.
-2. List databases the integration can see; pick the tasks and projects databases. If nothing is visible, explain which page to share.
-3. Map task properties (name, project relation, order, done), detecting defaults.
-4. Pick the parent page and **create the Time entries database** there with a tool-owned schema:
+1. Validate `NOTION_TOKEN` with a "who am I" call; if unset, `no_token`.
+2. Find the tasks and projects databases; if none are visible, say which page to share.
+3. Map the task properties (name, project, order, done), detecting defaults.
+4. Create the **Time entries** database under the parent page:
 
    | Property | Type |
    |---|---|
    | Title | title (description, else task name, else "(no description)") |
    | Task | relation to the tasks database (two-way) |
-   | Start, End | date (with time) |
+   | Start, End | date with time |
    | Description | text |
    | Local ID | text |
-   | Minutes | formula: `End − Start` in whole minutes. Start and End are always whole minutes (see Minutes below), so the formula needs no rounding |
+   | Minutes | formula: whole minutes from Start to End |
 
-5. Choose a default project, fill in the context's Notion columns (§4) in one transaction, and do a first full task refresh. Entries recorded before `init` stay as they are, unattached; `init` reports how many there are and suggests `tt attach --entry`.
+5. Choose a default project, store the Notion IDs in one transaction, and do a full task refresh. Report how many earlier entries are waiting and suggest `tt attach --entry`.
+6. Print the steps for adding a `Tracked (min)` rollup to the tasks database by hand. Nothing depends on it.
 
-Finally, `init` prints the steps for adding a rollup to the tasks database by hand (for example `Tracked (min)`: the sum of `Minutes` through the entries relation). Nothing in the tool depends on it.
+Notion computes all totals; the tool never writes a duration, and never touches existing hand-maintained fields.
 
-Notion computes all totals. The tool never writes a duration or total. An existing hand-maintained number such as `Time Logged (min)` is never touched; combining legacy and tracked totals is the user's Notion setup.
-
-**Minutes.** Notion drops the seconds (and milliseconds) from `Start` and `End`: a time sent as 09:01:30 is read back as 09:01:00 (verified in the spike). So the CLI truncates both timestamps to the minute, in UTC, before sending them, and defines an entry's `minutes` as the difference between its minute-truncated start and end. The `Minutes` formula in Notion computes exactly that, so per-entry minutes agree on both sides, and Notion still computes the totals. The exact span is kept locally and reported in JSON as `seconds`; `minutes` can differ from `seconds ÷ 60` by up to a minute either way (an entry from 09:01:50 to 09:02:10 is 20 seconds and 1 minute; one from 09:01:00 to 09:01:59 is 59 seconds and 0 minutes). The error is unbiased, because truncating both ends cancels out on average. An entry that starts and ends within the same minute counts as 0 minutes but is kept. Totals shown by `status` and `list` are the sum of the per-entry minutes, which matches the rollup in Notion. The CLI does the truncation itself rather than leaving it to Notion, so the rule does not depend on Notion's behaviour.
+**Minutes.** Notion drops seconds from dates (verified in the spike), so the CLI truncates `start` and `end` to the minute itself before sending, and an entry's `minutes` is the difference of the truncated values. That makes the CLI and Notion's formula agree exactly. The trade-off is that an entry's `minutes` can be up to a minute more or less than its real length (`seconds`): 09:01:50 to 09:02:10 is 20 seconds but counts as 1 minute, and 09:01:00 to 09:01:59 is 59 seconds but counts as 0. The overs and unders cancel out across many entries, so totals don't drift. (Rounding each entry's length down instead would lose about 30 seconds per entry, every time.) An entry that counts as 0 minutes is still kept. Totals in `status` and `list` sum per-entry minutes, so they match the Notion rollup.
 
 ## 6. Sync
 
 ### 6.1 What is pushed
 
-A stopped entry **with a task attached**, regardless of whether the task is marked done. Running timers and unattached entries are held back and reported as `waiting`. Tombstoned entries archive their Notion row. A tombstoned entry with no stored page ID is looked up by `Local ID` first: if a row is found it is archived, otherwise the tombstone is dropped locally. Archiving a row that is already archived counts as success (to be confirmed; open question 19).
+Stopped entries with a task attached, even if that task is marked done in Notion. Running and unattached entries are held back (`waiting`). Tombstoned entries archive their row; one with no stored page ID is looked up by `Local ID` first and simply dropped if no row exists. Archiving an already-archived row counts as success (to confirm, question 19).
 
-**What is sent.** `Start` and `End` go as UTC instants (`Z` or `+00:00`), truncated to the minute (§5), and never with a `time_zone` field. Notion keeps the wall-clock digits of a timestamp and swaps its offset for the named zone's, so `08:00:15+00:00` sent with `time_zone: Europe/London` comes back as `08:00:00+01:00`, a different instant; with a non-UTC offset it rejects the request.
+`Start` and `End` are sent as UTC instants truncated to the minute, **never with `time_zone`**: Notion keeps the wall-clock digits and swaps in the named zone's offset, which changes the instant.
 
 ### 6.2 Idempotency
 
-Before every create request for an entry without a stored `entry_page_id`, query the entries database by `Local ID`. If a row exists, adopt its page ID and update it; otherwise set `create_attempted_at`, create the row, and immediately record the returned page ID. The lookup is repeated on every retry of a failed create, not only the first attempt: a request that timed out may have succeeded on Notion's side, and creating again without looking would duplicate the row. Entries with a page ID are updated directly. This makes a retry after a crash, a timeout or a cancelled request safe. Notion has no unique constraints, so this guarantee holds for a single writer, which the sync lock enforces (§6.5). It also relies on a filtered query seeing a row that was just created, which the Notion spike confirmed (40 creates, each followed at once by a query on `Local ID`: no misses, no duplicates; open question 17). The query does not return trashed pages, so a row archived in Notion is invisible to this lookup; §6.3 covers that case.
+Before creating a row for an entry with no `entry_page_id`, query by `Local ID`, on every attempt, not just the first (a timed-out create may have succeeded). If found, adopt its page ID and update; otherwise set `create_attempted_at`, create, and record the page ID at once. Entries with a page ID are updated directly. This makes retries after a crash, timeout or cancel safe, given a single writer (the sync lock, §6.5) and a query that sees just-created rows (confirmed in the spike, question 17). Trashed rows don't appear in the query; §6.3 handles them.
 
 ### 6.3 Failure handling
 
-Failures come in two kinds, and they are handled differently.
-
-- **Network-level failures**: the tool cannot reach Notion, or loses the connection part-way (cannot connect, connection reset or dropped, request timed out). Nothing is known to be wrong with the entry, so it is never marked `failed`: it stays `pending`.
-- **HTTP-level temporary errors** (429, 5xx): Notion answered, but could not do the work. After enough attempts the entry is marked `failed`.
+**Network-level** failures (no response) never mark an entry `failed`: it stays `pending`. **HTTP-level** temporary errors (429, 5xx) mark it `failed` after enough attempts.
 
 | Failure | Handling |
 |---|---|
-| Network-level failure | Retry the request with exponential backoff and jitter. Failures are counted per request attempt, across entries, and any successful request resets the count. After **3 consecutive network-level failures** the run stops and treats Notion as unreachable: the current entry and all remaining entries stay `pending`, entries already pushed stay `synced`, and the run exits 6 (`offline`). The error's `details` say how many entries were synced before it stopped and how many are still pending. |
-| Offline (the run's first connection attempt fails) | Abort at once, without retries, so being offline is quick: `offline: N entries pending`, exit 6. |
-| 429, 5xx | Retry with exponential backoff and jitter, honouring `Retry-After`; 5 attempts per entry, then the entry is recorded `failed` (`rate_limited` or `server_error`) and retried on the next run. A 429 pauses the whole run, not just that entry. Requests respect Notion's rate limit (~3 req/s). |
-| 401 | Abort the run: token invalid or revoked. |
-| 403/404 on the entries database | Abort: integration lost access or the database is gone; say which page to re-share. |
-| 404 on one entry's task page | Mark that entry `blocked` (`task_not_found`) with the error; continue with the rest. |
-| 404 on an entry's own row, or the row is archived (deleted or archived by hand in Notion) | Mark that entry `blocked` (`row_missing`) rather than silently recreating or restoring a row the user may have removed on purpose. Updating an archived page does not return 404: Notion answers 400 `validation_error` ("Can't edit block that is archived"). So on a 400 for an entry that has a stored page ID, the engine retrieves the page and treats it as `row_missing` if it is in the trash and as `bad_request` otherwise; the error text is not relied on (open question 19). `sync --retry-blocked` restores the row and applies the update in one request (`in_trash: false` together with the properties, which Notion accepts, unlike editing the archived page). It uses the stored page ID, because a `Local ID` query cannot find a trashed row. If the page is gone for good (404), it falls back to the `Local ID` lookup and creates the row. |
-| 400 on one entry | Mark `blocked` (`bad_request`); continue. |
+| First connection of the run fails | Abort at once: `offline`, exit 6. |
+| Network-level, mid-run | Retry with backoff and jitter. 3 consecutive failures (counted across entries, reset by any success) stop the run: remaining entries stay `pending`, exit 6 with synced/pending counts. |
+| 429, 5xx | Backoff with jitter, honouring `Retry-After`; 5 attempts, then `failed` (`rate_limited` / `server_error`). A 429 pauses the whole run. Stay under ~3 req/s. |
+| 401 | Abort: token invalid. |
+| 403/404 on the entries database | Abort: say which page to re-share. |
+| 404 on an entry's task | `blocked` (`task_not_found`); continue. |
+| Entry's own row deleted or trashed | `blocked` (`row_missing`), never silently recreated. Updating a trashed page returns 400, not 404, so on a 400 for an entry with a page ID, retrieve the page: trashed is `row_missing`, otherwise `bad_request`. |
+| Other 400 | `blocked` (`bad_request`); continue. |
 
-Blocked entries are not retried on every run. They become pending again when edited or re-attached, or with `sync --retry-blocked`; if one of those retries blocks again, that counts as blocked in that run (§6.4). Ctrl-C cancels the context, lets the in-flight request finish, saves state, and exits cleanly.
+`--retry-blocked` makes blocked entries pending for this run. For `row_missing` it restores and updates the row in one request (`in_trash: false` plus the properties) by stored page ID; if the page is gone for good, it falls back to the `Local ID` lookup and creates. Otherwise blocked entries wait until edited or re-attached.
 
-When a connection drops part-way through a create, the request may or may not have reached Notion. That is exactly the case `create_attempted_at` and the `Local ID` lookup cover: the next sync finds the row if it was created, adopts its page ID, and updates it, and creates it only if it is not there.
+Ctrl-C lets the in-flight request finish, saves state and exits cleanly.
 
-**Edits during a sync.** A sync records the `updated_at` of each entry it reads and marks the entry `synced` only if `updated_at` is unchanged when the push succeeds. Otherwise the entry stays `pending` and is pushed again on the next run, so an edit made while a sync is running is never lost.
+**Edits during a sync** aren't lost: an entry is marked `synced` only if its `updated_at` is unchanged since the sync read it; otherwise it stays `pending`.
 
 ### 6.4 Output and exit codes
-
-**Table output** (the default). `tt sync` prints one line per entry it pushed or could not push, then a blank line and a summary. Each line is a status word, the entry's label, and a detail column: the duration for entries that were pushed, or the reason for anything else. If entries blocked by earlier runs are still blocked, a last line reminds you of them.
 
 ```
 $ tt sync
 synced   Local store for time entries   1h 12m
+synced   Timer commands                 45m
+synced   Code review with Claude        20m
 failed   Add retry logic                429 rate limited, will retry next run
+failed   Task cache refresh             503 server error, will retry next run
 blocked  Old task                       task not found in Notion; run 'tt attach --entry a1b2c3d'
 waiting  2 entries without a task
 
-synced 1 · failed 1 · blocked 1 · waiting 2
+synced 3 · failed 2 · blocked 1 · waiting 2
 2 earlier entries still blocked (see 'tt status')
 ```
 
-| Status | Meaning | Tried again on the next run? |
-|---|---|---|
-| `synced` | Pushed to Notion (created, updated or archived). | Not needed |
-| `failed` | Notion answered with a temporary error (rate limit or server error) that persisted after 5 attempts. Network failures never produce `failed`; they leave entries `pending` and end the run with exit 6. | Yes |
-| `blocked` | A permanent problem with this entry, such as its task being deleted in Notion. | No, until you fix it (`attach`, `edit`) or run `sync --retry-blocked` |
-| `waiting` | Stopped, but not attached to a task, so it was not sent. This is not a failure. Shown as one grouped line with a count, not one line per entry. | Yes, once attached |
+One line per entry pushed or not pushed (waiting entries grouped), a summary, and a reminder of entries still blocked from earlier runs.
 
-**Exit codes** for `sync` come from the global scheme in §8. Two are specific to `sync`:
+**Exit 0** if nothing failed or became blocked *in this run*; **exit 1** if something did (including a retried entry that blocks again). Waiting entries and old blocked entries don't count, so a scheduled sync reports a problem once rather than looking broken until it's fixed; `still_blocked` and `tt status` keep it visible. Other codes (4, 5, 6) as in §8.
 
-| Code | When |
-|---|---|
-| 0 | Nothing failed and nothing became blocked in this run. Waiting entries do not count. Entries that were already blocked by an earlier run, and that this run did not touch, do not count either. |
-| 1 | The run happened, and at least one entry `failed` or became `blocked` in it (a retry that blocks again counts). |
+The JSON form of the same result is the `sync` document in §8.
 
-Exit 4 (`sync_busy`, §6.5), 5 (the run could not start) and 6 (`offline`, §6.3) are as in §8.
+### 6.5 Sync lock and scheduled sync
 
-So a permanent problem is reported with exit 1 once, when it happens, and a scheduled `tt sync` then goes back to exit 0 rather than looking broken until someone fixes the entry. The blocked entry is not forgotten: it stays in the `still_blocked` count, in the reminder line above, and in `tt status` until it is fixed.
+Every sync takes an advisory file lock in the data directory before reading any entry and holds it for the run (the OS releases it if the process dies). If it's held, `tt sync` fails with `sync_busy` (exit 4). Only sync takes the lock.
 
-**JSON output** (`--output json`) carries the same information: a `results` array with one object per entry touched in this run (its ID, its state, and an `error` with a stable `code` if it did not sync), plus a `summary` of the counts. `still_blocked` counts entries blocked by earlier runs that this run left alone.
-
-```
-{
-  "schema_version": 1,
-  "results": [
-    {"entry_id": "a1b2c3d4-…", "state": "synced"},
-    {"entry_id": "b7c8d9e0-…", "state": "failed",
-     "error": {"code": "rate_limited", "message": "429, 5 attempts, will retry next run"}}
-  ],
-  "summary": {"synced": 1, "failed": 1, "blocked": 0, "waiting": 0, "still_blocked": 2}
-}
-```
-
-This example exits with code 1 (an entry failed in this run). The per-entry `error.code` values are: for `failed`, `rate_limited` and `server_error`; for `blocked`, `task_not_found`, `row_missing` and `bad_request`. A run that ends with exit 6 is a failed command (§8), so it writes the error document to stderr, with the counts in `details`, rather than a `results` array.
-
-### 6.5 One sync at a time, and scheduled sync
-
-**Sync lock.** The guarantee in §6.2 holds for a single writer, so every sync takes a lock before it reads any entry and holds it for the whole run (an advisory lock on a file in the data directory, released by the OS if the process dies). A `tt sync` that finds the lock held fails with `sync_busy` (exit 4). Only `sync` takes the lock: other commands write locally, and WAL lets them run while a sync does (§4).
-
-**Scheduled sync.** For a periodic catch-up (for example after a long offline spell), a cron job or launchd agent running `tt sync --no-input` works as is. It exits 1 once when an entry fails or becomes blocked and 0 afterwards (§6.4), so it does not look permanently broken. If it overlaps a manual sync, one of them exits 4 (`sync_busy`) and the next run picks up whatever is left. The tool does not install the job.
+A cron job or launchd agent running `tt sync --no-input` works as is: it exits 1 once per new problem, and an overlap with a manual sync just exits 4. The tool doesn't install the job.
 
 ## 7. Command errors vs sync failures
 
-Command errors are local, immediate, and never retried: `stop` with nothing running; `start` while a timer runs without `--switch`; `start` with no description and no task; `--at`, `--ago`, `--start`, `--end` or `--duration` giving an impossible span (an end before its start, or a time in the future); a selector that matches nothing or too much; a cancelled picker (`cancelled`, exit 2, nothing changed); a command that needs Notion run in a context that is not connected yet (`not_initialised`, exit 5, with a hint to run `tt init`); an unusable SQLite file (`database_unusable`, exit 5). Notion being unreachable is never an error for `start`, `stop`, `status`, or `list`, and none of them needs `init`. Only `init` and `sync` require Notion to be reachable. Each error maps to a stable exit code (§8).
+Command errors are local, immediate and never retried: nothing running, a timer already running, no description or task, an impossible time, a selector that matches nothing or too much, a cancelled picker, a context not yet connected, an unusable database. Notion being unreachable is never an error for `start`, `stop`, `status` or `list`; only `init` and `sync` need it. Codes: §8.
 
 ## 8. Agent-friendly interface
 
-The CLI is designed to be driven by scripts and AI agents as well as people. The rules below apply to every command.
+Table output is for people and may change. **JSON output (`--output json`) is the contract.**
 
-**Output format.** `--output table|json` (default `table`). Table output is for humans and may change between releases. JSON output is the contract.
+**Conventions**
 
-**JSON conventions**
+- One JSON document on stdout, with a top-level `schema_version`, printed compactly on a single line (pipe through `jq` to read it). The examples below are indented for reading only.
+- Mutating commands return the resulting entry under `entry`, so no follow-up `list` is needed.
+- Each command has a fixed set of keys; inapplicable values are `null`, never missing.
+- Timestamps are RFC 3339 UTC; durations are integer seconds.
+- A plural key holds an array (`entries`, `tasks`); a singular key holds one object. Collections are always wrapped in an object, never a bare array.
+- `warnings` is an array in every success document, `[]` when empty. Each warning is `{"code", "message", "details"}`; codes are `overlap` (`details.entry_ids`), `stale_timer` and `task_cache_stale`.
+- `list` and `task list` accept `--limit N` and include `truncated`: `true` when more rows matched than were returned, so a script knows it isn't seeing everything. Totals still cover every matching row: `list`'s `total_minutes` is the same with or without `--limit`.
+- Order is part of the contract: `list` chronological; `task list` by Order, then name, unordered last.
 
-- One JSON document on stdout per invocation, with a top-level `schema_version` integer.
-- Mutating commands return the resulting object under `entry` (`start`, `stop`, `add`, `attach`, `edit`, `delete`), or per-entry results plus a summary (`sync`), so no follow-up `list` is needed.
-- Fields are never omitted: absent values are `null`. IDs are always included. A command's set of keys is fixed, so a key that does not apply to an invocation (such as `stopped` on a plain `start`) is `null`, not missing.
-- Timestamps are RFC 3339 in UTC; durations are integer seconds everywhere (the command line still accepts `10m` and `1h30m` as input).
-- Key naming: a command that returns many things uses a plural key holding an array (`entries`, `tasks`); one that returns a single thing uses the singular key (`entry`).
-- Notices that would otherwise be a line of text (e.g. "using task cache from 3h ago") appear in a `warnings` array, present in every success document except `sync`'s (which reports problems per entry, §6.4) and `[]` when empty. Each warning is an object, `{"code", "message", "details"}`: `code` is stable and documented, `message` is not, and `details` is `null` when there is nothing to add. Overlaps with existing entries (from `start --at/--ago`, `add`, or `edit`) are reported as `overlap` warnings whose `details.entry_ids` lists the overlapping entries. The warning codes are `overlap`, `stale_timer` and `task_cache_stale`.
-- Commands with `--limit` (`list`, `task list`) include `"truncated"`, true when the limit cut the result.
-- Array order is part of the contract: `list` is chronological, and `task list` is sorted by Order, then name, with tasks that have no Order last.
-- `--wide` affects table output only.
-- Discovery: agents find task IDs with `tt task list --output json` and entry IDs with `tt list --output json` (or from the response to `start` and `stop`). Every selector accepts the IDs those commands return.
+**Entry object**
 
-**Entry object.** Wherever an entry is returned it has these fields:
-
+```json
+{
+  "id": "a1b2c3d4-…",
+  "start": "2026-10-12T09:00:00Z",
+  "end": "2026-10-12T10:12:00Z",
+  "seconds": 4320,
+  "minutes": 72,
+  "description": null,
+  "task": {
+    "page_id": "…",
+    "short_id": "c8d9e0",
+    "name": "…"
+  },
+  "sync_state": "pending",
+  "sync_error": null,
+  "deleted": false
+}
 ```
-{"id": "a1b2c3d4-…", "start": "2026-10-12T09:00:00Z", "end": "2026-10-12T10:12:00Z",
- "seconds": 4320, "minutes": 72, "description": null,
- "task": {"page_id": "…", "short_id": "c8d9e0", "name": "…"},
- "sync_state": "pending", "sync_error": null, "deleted": false}
+
+`task` is `null` when unattached; `end`, `seconds` and `minutes` are `null` while running. `minutes` follows §5.
+
+**Task item** (in `task list` and in `ambiguous_selector` candidates)
+
+```json
+{
+  "page_id": "3f63b23e…",
+  "short_id": "837922",
+  "order": 2.3,
+  "name": "Write the sync engine",
+  "project": {
+    "page_id": "3e73b23e…",
+    "name": "Time tracker"
+  },
+  "done": false
+}
 ```
 
-`task` is `null` for an unattached entry. For a running entry, `end`, `seconds` and `minutes` are `null`. `seconds` is the exact span; `minutes` follows the rule in §5 (Minutes).
+**`sync` document**
 
-**Responses by command**
+`results` has one object per entry this run touched: `entry_id`, `state` (`synced`, `failed` or `blocked`), and `error` (`{"code", "message"}`, `null` when synced). Waiting entries aren't touched, so they appear only in the `summary` count. `still_blocked` counts entries blocked by earlier runs that this run left alone. An entry's own outcome goes only in its `error`; `warnings` holds notices about the run as a whole, such as a pause for rate limiting.
 
-| Command | Document (besides `schema_version`) |
+```json
+{
+  "schema_version": 1,
+  "results": [
+    {"entry_id": "a1b2c3d4-…", "state": "synced", "error": null},
+    {"entry_id": "b2c3d4e5-…", "state": "synced", "error": null},
+    {"entry_id": "c3d4e5f6-…", "state": "synced", "error": null},
+    {"entry_id": "d4e5f6a7-…", "state": "failed", "error": {"code": "rate_limited", "message": "429, 5 attempts, will retry next run"}},
+    {"entry_id": "e5f6a7b8-…", "state": "failed", "error": {"code": "server_error", "message": "503, 5 attempts, will retry next run"}},
+    {"entry_id": "f6a7b8c9-…", "state": "blocked", "error": {"code": "task_not_found", "message": "task not found in Notion"}}
+  ],
+  "summary": {
+    "synced": 3,
+    "failed": 2,
+    "blocked": 1,
+    "waiting": 2,
+    "still_blocked": 2
+  },
+  "warnings": []
+}
+```
+
+This is the run shown in §6.4, and it exits 1. Per-entry codes are `rate_limited` and `server_error` for `failed`, and `task_not_found`, `row_missing` and `bad_request` for `blocked`. They describe one entry's outcome, never a failed command. A run that ends in exit 6 is a failed command and writes an error document instead (Errors, below).
+
+**Documents by command**
+
+| Command | Keys (besides `schema_version`) |
 |---|---|
-| `start` | `entry`, `stopped` (`null`, or the entry that `--switch` stopped), `warnings` |
+| `start` | `entry`, `stopped` (the entry `--switch` stopped, else `null`), `warnings` |
 | `stop`, `add`, `attach`, `edit` | `entry`, `warnings` |
-| `delete` | `dry_run`, `action` (`remove` or `tombstone`), `entry`, `removed` (true if removed outright rather than tombstoned), `warnings`. With `--dry-run`, `dry_run` is true and `removed` is `null`: nothing was changed, so there is no outcome. |
-| `status` | `running` (an entry or `null`), `elapsed_seconds` (`null` when nothing is running), `today` (`entries`, `minutes`), `counts` (`pending`, `blocked`, `waiting`), `connected` (boolean), `warnings` (including the stale-timer warning) |
-| `list` | `entries` (an array), `total_minutes`, `truncated`, `warnings` |
-| `task list` | `tasks` (an array of task items, below), `truncated`, `warnings` |
-| `sync` | `results` and `summary` (§6.4) |
-| `init`, `task refresh` | the affected objects, named by the key rule above; their fields are fixed when those commands are built |
+| `delete` | `dry_run`, `action` (`remove` or `tombstone`), `entry`, `removed` (true if removed outright, `null` with `--dry-run`), `warnings` |
+| `status` | `running` (entry or `null`), `elapsed_seconds`, `today` (`entries` count, `minutes`), `counts` (`pending`, `blocked`, `waiting`), `connected`, `warnings` |
+| `list` | `entries`, `total_minutes`, `truncated`, `warnings` |
+| `task list` | `tasks`, `truncated`, `warnings` |
+| `sync` | `results`, `summary`, `warnings` (`sync` document, above) |
+| `init`, `task refresh` | fixed when built |
 
-A collection is always an object holding an array, never a bare array, so it can carry `warnings` and totals.
+In `status` and `list`, today's minutes include the running entry's elapsed minutes (same clock reading as `elapsed_seconds`), so the two agree. A timer left running from yesterday isn't part of today; `stale_timer` flags it.
 
-**Task item.** Wherever a task appears in a list (`task list`, and the `candidates` list in errors), it has these fields:
+Example, `tt status` before `init`:
 
-```
-{"page_id": "3f63b23e…", "short_id": "837922", "order": 2.3,
- "name": "Learn: error wrapping", "project": {"page_id": "3e73b23e…", "name": "Go Time Tracker"},
- "done": false}
-```
-
-`order` is a number, or `null` when unset (it is not unique). `project` is an object, or `null` for a task with no project.
-
-**`status` and "today".** `elapsed_seconds` is the running entry's elapsed time, measured with the same clock reading as `today.minutes`. A running entry shows `end`, `seconds` and `minutes` as `null`, so this is how a script learns how long it has been running. `today.entries` is a count (`list` returns the entries themselves). `today.minutes` and `list`'s `total_minutes` are the minutes of all finished entries plus the elapsed minutes of the running entry, so the two commands agree. A running entry belongs to the day it started (§3.2), so a timer left running from yesterday is not part of "today"; the `stale_timer` warning flags it. Minutes are summed from each entry's own `minutes` value (§5), and the running entry's is computed the same way with the current time as its end.
-
-**Examples**
-
-`tt start --switch` (the `entry` and `stopped` values are entry objects, shortened here):
-
-```
-{"schema_version": 1,
- "entry": {"id": "b2c3d4e5-…", "start": "2026-10-14T10:12:40Z", "end": null, "seconds": null, …},
- "stopped": {"id": "a1b2c3d4-…", "start": "2026-10-14T09:00:12Z", "end": "2026-10-14T10:12:40Z",
-             "seconds": 4348, "minutes": 72, …},
- "warnings": []}
+```json
+{
+  "schema_version": 1,
+  "running": null,
+  "elapsed_seconds": null,
+  "today": {
+    "entries": 0,
+    "minutes": 0
+  },
+  "counts": {
+    "pending": 0,
+    "blocked": 0,
+    "waiting": 0
+  },
+  "connected": false,
+  "warnings": []
+}
 ```
 
-A plain `tt start` returns the same keys with `"stopped": null`.
+**Streams.** Data to stdout; diagnostics, warnings and errors to stderr. No colour or spinners when stdout isn't a terminal or `NO_COLOR` is set.
 
-`tt delete --dry-run`:
+**No prompts** unless stdin and stdout are terminals and `--no-input` isn't set. Otherwise nothing blocks: `--pick` is a usage error, an ambiguous selector fails with its candidates, `delete` needs `--yes`, and every `init` prompt has a flag.
 
-```
-{"schema_version": 1, "dry_run": true, "action": "tombstone",
- "entry": {"id": "a1b2c3d4-…", …}, "removed": null, "warnings": []}
-```
+**Errors.** A failed command (exit 2 or above) writes `{"schema_version": 1, "error": {"code", "message", "details"}}` to stderr and nothing to stdout. `code` is stable; `message` isn't. `sync` with exit 1 hasn't failed: it writes its normal document to stdout.
 
-`tt status` with nothing running, before `init` (exit 0):
-
-```
-{"schema_version": 1, "running": null, "elapsed_seconds": null,
- "today": {"entries": 0, "minutes": 0}, "counts": {"pending": 0, "blocked": 0, "waiting": 0},
- "connected": false, "warnings": []}
-```
-
-A warning:
-
-```
-{"code": "overlap", "message": "overlaps 1 existing entry",
- "details": {"entry_ids": ["9f8e7d6c-…"]}}
-```
-
-**Streams.** Data goes to stdout; diagnostics, warnings and errors go to stderr. No colour, spinners or progress output when stdout is not a terminal or `NO_COLOR` is set.
-
-**Errors.** With `--output json`, a failed command (exit code 2 or above) writes `{"schema_version": 1, "error": {"code": "...", "message": "...", "details": {...}}}` to stderr and nothing to stdout. The `code` string is stable and documented; messages are not. For example, `timer_running` carries the running entry in `details`, and `offline` from `sync` carries how many entries were synced before it stopped and how many are still pending. A `sync` that ran but finished with failed or blocked entries (exit 1) has not failed as a command: it writes its normal result document to stdout.
-
-**No prompts.** Prompts (task picker, confirmations, `init` wizard) appear only when both stdin and stdout are terminals and `--no-input` is not set. Otherwise the command never blocks:
-
-- `--pick` (the picker) without a terminal is a usage error. A bare `--task` is also a usage error: it always needs a value.
-- An ambiguous selector fails with the candidate list, in `details` for JSON output.
-- Destructive commands (`delete`) require `--yes`.
-- Every `init` prompt has a flag equivalent (§3.4).
-
-**Exit codes** are global and stable:
-
-| Code | Meaning | Example error codes |
+| Exit | Meaning | Codes |
 |---|---|---|
 | 0 | Success | |
-| 1 | Partial failure: `sync` finished, but an entry failed or became blocked in the run | `sync_partial` |
-| 2 | Usage error: bad flags or arguments, invalid time, cancelled picker | `usage`, `invalid_time`, `confirmation_required`, `cancelled` |
-| 3 | Not found or ambiguous selector | `not_found`, `ambiguous_selector` |
+| 1 | `sync` finished, but an entry failed or became blocked in this run | `sync_partial` (not an error document) |
+| 2 | Usage | `usage`, `invalid_time`, `confirmation_required`, `cancelled` |
+| 3 | Not found or ambiguous | `not_found`, `ambiguous_selector` |
 | 4 | State conflict | `timer_running`, `no_timer_running`, `sync_busy` |
-| 5 | Config, auth or local-store problem, or context not connected to Notion | `not_initialised`, `no_token`, `access_denied`, `database_too_new`, `database_unusable` |
+| 5 | Config, auth, local store, or not connected | `not_initialised`, `no_token`, `access_denied`, `database_too_new`, `database_unusable` |
 | 6 | Notion unreachable (`sync` only) | `offline` |
-| 10 | Unexpected internal error | `internal` |
+| 10 | Internal error (no stack traces) | `internal` |
 
-`status` exits 0 even when nothing is running or the context is not connected; "nothing running" is a valid answer, not an error.
+**`details`** is `null` except for:
 
-**Error `details`.** `details` carries structured data a script can act on, and is `null` when there is none; it never repeats the message. The codes that carry it:
+| Code | `details` |
+|---|---|
+| `timer_running` | `{"entry": <entry>}` |
+| `offline` | `{"synced": n, "pending": n}` |
+| `ambiguous_selector` | `{"selector": "...", "candidates": [<task items>]}` |
+| `not_found` | `{"selector": "..."}` |
+| `invalid_time` | `{"input": "..."}` |
+| `confirmation_required` | `{"flag": "--yes"}` |
+| `database_too_new` | `{"database_version": n, "supported_version": n}` |
+| `database_unusable` | `{"path": "..."}` |
 
-| Code | Exit | `details` |
-|---|---|---|
-| `timer_running` | 4 | `{"entry": <entry object>}`, the timer that is running |
-| `offline` | 6 | `{"synced": n, "pending": n}` |
-| `ambiguous_selector` | 3 | `{"selector": "...", "candidates": [<task items>]}` |
-| `not_found` | 3 | `{"selector": "..."}` |
-| `invalid_time` | 2 | `{"input": "..."}` |
-| `confirmation_required` | 2 | `{"flag": "--yes"}` |
-| `database_too_new` | 5 | `{"database_version": n, "supported_version": n}` |
-| `database_unusable` | 5 | `{"path": "..."}`, the database file |
-
-Every other error code in the table above has `"details": null`: `usage`, `cancelled`, `no_timer_running`, `sync_busy`, `not_initialised`, `no_token`, `access_denied` and `internal`. `internal` never includes a stack trace or an underlying cause.
-
-The per-entry codes inside a `sync` result (`rate_limited`, `server_error`, `task_not_found`, `row_missing`, `bad_request`; §6.4) describe one entry's outcome, not a failed command, and never become an exit code. `sync_partial` (exit 1) is not an error document: `sync` finished and writes its normal result to stdout.
-
-**Previewing and bounding output.** `delete --dry-run` reports what would happen without changing anything. `list --limit N` bounds output size. Every command has `--help` text with examples.
+Every command has `--help` with examples.
 
 ## 9. Secrets
 
-The Notion token comes from the `NOTION_TOKEN` environment variable. It is never accepted as a flag (it would end up in shell history) and never stored in the SQLite database or any other file. If it is not set, commands that need it fail with `no_token` (exit 5) and say how to set it. OS keychain storage is deferred (DESIGN-LATER.md).
+The Notion token comes only from `NOTION_TOKEN`. It is never a flag (shell history) and never stored in the database or any file. If unset, commands that need it fail with `no_token` (exit 5). Keychain storage is deferred.
 
 ## 10. Implementation notes
 
-- Go, single static binary; pure-Go SQLite driver.
-- CLI framework (Cobra vs stdlib `flag`) is an implementation choice, not a design decision. The design avoids optional-value flags, which pflag does not let take the next argument as their value: `--task` always takes a value and the picker is the separate `--pick` flag (open question 12, resolved). That also works with the stdlib `flag` package.
-- Use the Notion API's data-source IDs for schemas and queries, and pin the API version: `Notion-Version: 2025-09-03`. Query with `POST /v1/data_sources/{id}/query`; the older `POST /v1/databases/{id}/query` returns 400 `invalid_request_url`. Store the data-source ID, not only the database ID.
-- Keep the Notion client behind an interface so sync logic can be tested against a fake.
-- Embed the timezone database (`import _ "time/tzdata"`, about 450 KB) so `TT_TIMEZONE` zone names resolve in minimal containers and the binary stays self-contained.
-- Take time from an injectable `Clock` interface, not `time.Now` directly: "no future times", resolving `HH:MM` to today, the stale-timer warning and cache TTLs all need a controllable clock.
-- `time.Date` does not guarantee what it returns for a local time that does not exist or occurs twice; detect both by converting the result back and comparing, so an `HH:MM` on a daylight-saving change day fails with `invalid_time` (§3.1). Test on both change days.
-- Open SQLite in WAL mode with a busy timeout and foreign keys on, and keep transactions short and local (§4). The first migration creates the single context row, so every command can assume it exists.
-- Test the first-run path explicitly: timing before `init`, then `init` connecting the context with its entries intact.
-- The sync result needs to tell "blocked in this run" from "was already blocked": have the engine return a per-entry outcome for each entry it touched, and count the untouched blocked entries separately for `still_blocked`. The exit code is then a pure function of those counts, which makes it easy to table-test.
-- Have the HTTP client classify every error as network-level (no response) or HTTP-level (a status code) in one place, and keep the consecutive-network-failure counter in the sync engine, not the client. Test the drop-mid-create case with a fake Notion client that creates the row and then fails the response: the next run must find the row by `Local ID` and not duplicate it.
-- Truncate timestamps to the minute in one place, the function that builds the Notion payload, and test it: 09:01:50 becomes 09:01:00, a time already on a whole minute is unchanged, and `minutes` comes out right for 31 s, 59 s and 90 s spans and for a pair that straddles a minute boundary (09:01:59 to 09:02:00 is 1 minute). The fake Notion client should reject a payload that contains `time_zone`.
-- Test the archived-row paths against the fake client: an update answered with 400 for a trashed page becomes `row_missing`, `--retry-blocked` restores and updates in one request, and archiving an already-archived row counts as success.
-- Test the sync lock: a second `tt sync` started while one holds the lock exits 4 without reading any entry.
+**Constraints**
+
+- Single static Go binary; pure-Go SQLite driver (no cgo); embedded timezone database (`time/tzdata`) so `TT_TIMEZONE` works in minimal containers.
+- No optional-value flags (pflag can't take the next argument as their value), so either Cobra or stdlib `flag` works.
+- Notion API pinned to `Notion-Version: 2025-09-03`, using data-source IDs and `POST /v1/data_sources/{id}/query` (the old database query endpoint returns 400).
+- Behind interfaces, for testing: the Notion client, and a `Clock` (no `time.Now` directly).
+- Classify every HTTP error as network-level or HTTP-level in one place; keep the consecutive-failure counter in the sync engine.
+- Truncate to the minute in one place: the function that builds the Notion payload.
+- `time.Date` doesn't flag non-existent or repeated local times; detect them by converting back and comparing.
+- Have the sync engine return a per-entry outcome and count untouched blocked entries separately, so the exit code is a pure function of the counts.
+
+**Tests that must exist**
+
+- Two running rows: the second insert fails.
+- First run: timing before `init`, then `init` connecting with entries intact.
+- Drop mid-create (fake client creates the row, then fails): the next run finds it by `Local ID` and doesn't duplicate.
+- Minute truncation: 09:01:50 → 09:01:00; whole minutes unchanged; 31 s, 59 s, 90 s spans; 09:01:59 → 09:02:00 is 1 minute. The fake client rejects any payload with `time_zone`.
+- Archived rows: a 400 on a trashed page is `row_missing`; `--retry-blocked` restores and updates in one request; archiving an archived row succeeds.
+- `HH:MM` on both DST change days.
+- A second `tt sync` while one holds the lock exits 4 without reading entries.
 
 ## 11. Decision log and open questions
 
-Numbers are stable IDs, so references elsewhere (and in Notion task comments) keep working. Questions 10, 11 and 13 moved to [DESIGN-LATER.md](DESIGN-LATER.md) with their features.
+Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to [DESIGN-LATER.md](DESIGN-LATER.md).
 
-**Open for v1**
+**Open**
 
-- **2. Selector that matches nothing in the cache** is currently an error, even if the task was created seconds ago and the refresh timed out. Revisit if this proves annoying.
-- **6. Full task refresh cadence** for detecting deleted or archived tasks.
-- **7. JSON schema stability:** what bumps `schema_version`, and whether to publish JSON schemas for each command's output (useful for the Claude skill and for contract tests). The shapes themselves are defined in §8.
-- **8. Short ID stability:** a displayed task short ID is relative to the cache, so it may need to lengthen as tasks are added. Scripts should store the full page ID from JSON output, which every selector accepts.
-- **9. Overlapping entries:** currently allowed with a warning, since the user is the authority on what they did. The alternative is to reject overlaps unless `--force` is given, which prevents double-counted time at the cost of friction. Revisit after real use.
-- **19. Archived rows, remaining probe.** The spike did not cover two things that §6.1 and §6.3 rely on. (a) Archiving a page that is already archived (`in_trash: true` on a trashed page). This happens when a `delete`'s archive reached Notion but the local update was lost, and the next sync repeats it. The design treats it as success; confirm that Notion does not answer with an error that needs different handling. (b) Retrieving a trashed page reports it as trashed (`in_trash`), which is how a 400 on update is classified as `row_missing` rather than `bad_request`. A scratch probe against a throwaway entries database settles both.
+- **2.** A selector matching nothing is an error even if the task was created seconds ago and the refresh timed out. Revisit if annoying.
+- **6.** How often to run a full task refresh, to notice deleted tasks.
+- **7.** What bumps `schema_version`, and whether to publish JSON schemas per command.
+- **8.** Short IDs are relative to the cache and may lengthen; scripts should store full page IDs.
+- **9.** Overlaps are allowed with a warning; rejecting them without `--force` would stop double counting at the cost of friction. Revisit after real use.
+- **19.** Probe still needed: archiving an already-archived page, and retrieving a trashed page reporting `in_trash` (§6.1, §6.3).
 
 **Resolved**
 
-- **1. Rollup and `Minutes` formula through the API:** yes to both (spike, 13 Oct). `init` creates the formula; in v1 it prints steps for adding the rollup by hand, and offering to add it is deferred (§5).
-- **3. Stale-timer threshold:** fixed at 12 hours in v1 (§3.1); making it configurable is deferred with `tt config`.
-- **4. Rounding and date precision:** Notion truncates `Start` and `End` to the minute, so the CLI truncates before sending and defines `minutes` from the truncated endpoints (spike, 13 Oct; §5). The alternatives were the CLI writing `Minutes` itself, which would end Notion computing the totals, or keeping a nearest-minute rule, which would leave the CLI and Notion disagreeing on some entries. Never send `time_zone` (§6.1).
-- **5. Time zones:** UTC storage; the system zone or `TT_TIMEZONE` for local input and output; `HH:MM` means today, and fails on daylight-saving gaps and overlaps (§3.1). Still to test: `list` day boundaries on the two change days.
-- **12. Task picker flag:** `--task SELECTOR` always takes a value, and the picker is the separate boolean `--pick`, because pflag optional-value flags do not consume the next argument (`tt start --task 4.1` would have taken `4.1` as the description). Cancelling it changes no data and exits 2 as `cancelled` (§3.1).
-- **14. Using `tt` before `init`:** the first migration creates the context local-only; timing works without Notion, and `init` connects it in place, keeping its ID and entries (§4, §5).
-- **15. Cron and blocked entries:** `sync` exits 1 only when an entry failed or became blocked in that run; entries blocked by earlier runs stay visible as `still_blocked`, in a reminder line and in `tt status` (§6.4).
-- **16. Context storage:** the context lives in the SQLite database with the entries, with foreign keys, so there is no separate config file to lose or fall out of step. Tokens stay out of the database (§4, §9).
-- **17. Query-after-create consistency:** 40 creates, each followed at once by a filtered query on `Local ID`, gave no misses and no duplicates (spike, 13 Oct), so no post-sync duplicate check is added. This is evidence rather than a guarantee; the failure-matrix tests repeat it under realistic sync load. Editing an archived page fails with 400 `validation_error`, and a trashed page does not appear in a `Local ID` query (§6.2, §6.3).
-- **18. Network-failure handling:** network-level failures are counted per request attempt; 3 in a row stop the run with the affected entries left `pending` and exit 6, while `failed` is reserved for 429 and 5xx errors that persist after 5 attempts. The first connection failure of a run aborts at once (§6.3).
+- **1.** `init` can create the `Minutes` formula and a rollup via the API (spike, 13 Oct). v1 creates the formula and prints rollup steps.
+- **3.** Stale-timer threshold fixed at 12h in v1.
+- **4.** Notion truncates dates to the minute, so the CLI truncates first and derives `minutes` from the truncated ends (spike). Rejected: the CLI writing minutes (Notion should compute totals) and nearest-minute rounding (the two would disagree). Never send `time_zone`.
+- **5.** UTC storage; system zone or `TT_TIMEZONE`; `HH:MM` is today only. Still to test: `list` boundaries on DST days.
+- **12.** `--task` always takes a value and the picker is a separate `--pick`, because pflag optional values don't consume the next argument (`--task 4.1` would make `4.1` the description).
+- **14.** The first migration creates the context local-only; `init` connects it in place.
+- **15.** `sync` exits 1 only for problems new in that run, so scheduled syncs don't stay red.
+- **16.** The context lives in SQLite with the entries; no config file.
+- **17.** Query-after-create is consistent (40 creates, no misses or duplicates in the spike), so there's no post-sync duplicate check. Editing a trashed page returns 400; trashed pages don't appear in `Local ID` queries.
+- **18.** Network failures are counted per attempt; 3 in a row stop the run with entries left `pending` (exit 6); `failed` is only for persistent 429/5xx.

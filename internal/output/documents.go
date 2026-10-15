@@ -4,13 +4,12 @@ package output
 type EntryDoc struct {
 	BaseSchema
 	Entry Entry `json:"entry"`
-	Sync  Sync  `json:"sync"`
 	BaseWarnings
 }
 
-func NewEntryDoc(e Entry, s Sync, w []Warning) EntryDoc {
+func NewEntryDoc(e Entry, w []Warning) EntryDoc {
 	if w == nil {
 		w = []Warning{}
 	}
-	return EntryDoc{BaseSchema: BaseSchema{SchemaVersion}, Entry: e, Sync: s, Warnings: w}
+	return EntryDoc{BaseSchema: BaseSchema{SchemaVersion}, Entry: e, Warnings: w}
 }

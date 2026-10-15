@@ -27,7 +27,6 @@ func TestExitCode_ReturnsExpectedCodes(t *testing.T) {
 		{NotInitialised, 5},
 		{NoToken, 5},
 		{AccessDenied, 5},
-		{SchemaMismatch, 5},
 		{DatabaseTooNew, 5},
 		{DatabaseUnusable, 5},
 		{Offline, 6},

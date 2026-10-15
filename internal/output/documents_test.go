@@ -31,7 +31,7 @@ func newTestEntry() Entry {
 }
 
 func TestEntryDoc_Marshal_EmbeddedFieldsFlattenedToTopLevel(t *testing.T) {
-	doc := NewEntryDoc(newTestEntry(), Sync{Attempted: true, Result: SyncResultSynced}, nil)
+	doc := NewEntryDoc(newTestEntry(), nil)
 
 	resultsMap := marshalAndDecodeEntryDoc(t, doc)
 
@@ -49,15 +49,6 @@ func TestEntryDoc_Marshal_EmbeddedFieldsFlattenedToTopLevel(t *testing.T) {
 		t.Errorf("Got entry.id = %v, want %q", value, "1234")
 	}
 
-	syncMap, ok := resultsMap["sync"].(map[string]any)
-	if !ok {
-		t.Fatalf("Got sync = %v, want an object", resultsMap["sync"])
-	}
-
-	if value, ok := syncMap["result"]; !ok || value != "synced" {
-		t.Errorf("Got sync.result = %v, want %q", value, "synced")
-	}
-
 	// A nested BaseSchema/BaseWarnings key would mean the embedding is not flattened
 	for _, key := range []string{"BaseSchema", "BaseWarnings"} {
 		if _, found := resultsMap[key]; found {
@@ -65,8 +56,8 @@ func TestEntryDoc_Marshal_EmbeddedFieldsFlattenedToTopLevel(t *testing.T) {
 		}
 	}
 
-	if len(resultsMap) != 4 {
-		t.Errorf("Got %d keys, want 4: %v", len(resultsMap), resultsMap)
+	if len(resultsMap) != 3 {
+		t.Errorf("Got %d keys, want 3: %v", len(resultsMap), resultsMap)
 	}
 }
 
@@ -83,7 +74,7 @@ func TestEntryDoc_Marshal_Warnings_AlwaysAnArray(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			doc := NewEntryDoc(newTestEntry(), Sync{}, tc.warnings)
+			doc := NewEntryDoc(newTestEntry(), tc.warnings)
 
 			resultsMap := marshalAndDecodeEntryDoc(t, doc)
 

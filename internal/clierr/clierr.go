@@ -20,7 +20,6 @@ const (
 	NotInitialised       ErrorCode = "not_initialised"
 	NoToken              ErrorCode = "no_token"
 	AccessDenied         ErrorCode = "access_denied"
-	SchemaMismatch       ErrorCode = "schema_mismatch"
 	DatabaseTooNew       ErrorCode = "database_too_new"
 	DatabaseUnusable     ErrorCode = "database_unusable"
 	Offline              ErrorCode = "offline"
@@ -52,7 +51,6 @@ var errorCodeExits = map[ErrorCode]int{
 	NotInitialised:   5,
 	NoToken:          5,
 	AccessDenied:     5,
-	SchemaMismatch:   5,
 	DatabaseTooNew:   5,
 	DatabaseUnusable: 5,
 

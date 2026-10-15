@@ -3,12 +3,9 @@ package output
 type WarningCode string
 
 const (
-	Overlap                 WarningCode = "overlap"
-	TimeResolvedToYesterday WarningCode = "time_resolved_to_yesterday"
-	AmbiguousLocalTime      WarningCode = "ambiguous_local_time"
-	StaleTimer              WarningCode = "stale_timer"
-	TaskCacheStale          WarningCode = "task_cache_stale"
-	SyncNote                WarningCode = "sync_note"
+	Overlap        WarningCode = "overlap"
+	StaleTimer     WarningCode = "stale_timer"
+	TaskCacheStale WarningCode = "task_cache_stale"
 )
 
 type Warning struct {

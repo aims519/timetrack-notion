@@ -21,6 +21,7 @@ The commands that change entries (`stop`, `add`, `edit`, `delete`, `attach`, and
 **Time limit.** The whole attempt is bounded by `auto_sync_timeout` (default 5s). When the limit is reached, the in-flight request is cancelled (unlike Ctrl-C in §6.3, which lets it finish) and the remaining entries stay pending. A cancelled create is safe: `create_attempted_at` is already set, so the next sync finds the row by `Local ID` (§6.2), and `delete` tombstones rather than removes the entry. A `Retry-After` longer than the time left ends the attempt. The normal 5-attempt backoff (§6.3) only applies within the limit; a manual `tt sync` has no such limit.
 
 **When it does not run, or stops early.** All of these leave the entries pending, exit with the command's own code, and report a short note:
+
 - Auto-sync is turned off (below).
 - The entry has no task, so it is `waiting`. No attempt is made and nothing is reported. This is always the case in a local-only context.
 - Offline or a dropped connection: connection setup is limited to 1s so an offline `stop` is not noticeably slower, and network-level failures end the attempt as in §6.3 (the 3-failure rule, or the time limit, whichever comes first). The note is `pending sync (offline)`; the command's exit code is unchanged, never 6.
@@ -30,7 +31,7 @@ The commands that change entries (`stop`, `add`, `edit`, `delete`, `attach`, and
 
 **Reporting.** The command's normal output comes first. In table mode, a single line follows on stderr, such as `synced 1 entry` or `pending sync (offline)`, and is omitted when there is nothing to say. With `--output json`, the entry-returning commands include a `sync` object, so an agent knows the entry's state without asking again:
 
-```
+```text
 "sync": {"attempted": true, "result": "synced", "pending": 0}
 ```
 
@@ -39,6 +40,7 @@ The commands that change entries (`stop`, `add`, `edit`, `delete`, `attach`, and
 **JSON contract changes.** The `sync` key is added to the documents of `start` (`null` unless `--switch`), `stop`, `add`, `attach`, `edit` and `delete` (`null` with `--dry-run`). `"sync": null` means the command never syncs; a `sync` object with `"attempted": false` means it would have but did not. Adding the key is backwards-compatible, and it follows §8's rule that keys are never missing (`null` when unused).
 
 **Control.**
+
 - Setting `auto_sync` (boolean, default `true`) and `auto_sync_timeout` (duration, default `5s`); see §4 of this file.
 - Per command: `--sync` and `--no-sync` on the commands listed above override the setting.
 - Per environment: `TT_AUTO_SYNC=false` (or `true`) overrides the setting for a run, which suits scripts and containers. Precedence: flag, then environment variable, then setting.
@@ -59,7 +61,7 @@ kubectl-style contexts, each pointing at a Notion workspace/project set.
 
 **Global flag.** `--context <name-or-id>` overrides the current context.
 
-**Commands**
+**Commands.**
 
 | Command | Behaviour |
 |---|---|
@@ -69,7 +71,7 @@ kubectl-style contexts, each pointing at a Notion workspace/project set.
 | `tt project list \| current \| use <name>` | List cached projects, show, or set the current context's default project. Shortcut for `context set --project`. |
 | `tt init --context <name>` | See "Which context `init` configures" below. |
 
-**Data model additions to `contexts`**
+**Data model additions to `contexts`.**
 
 | Column | Notes |
 |---|---|
@@ -83,7 +85,6 @@ A context's data is deleted explicitly, in one transaction, by `context delete`.
 **Which context `init` configures.** In order: the context named by `--context`, if it exists; otherwise the local-only `default` context, which is adopted and renamed to the `--context` name if one was given (it keeps its ID and entries); otherwise a new context is created. Without `--context`, it configures the current context. Running `init` again on a connected context is safe: it re-detects and reuses what exists.
 
 **JSON.** `status` returns `context` (`id`, `name`, `connected`) in place of v1's `connected`. The `context` and `project` commands return the affected objects under `contexts`, `context`, `projects` or `project`; their fields are fixed when those commands are built. Destructive commands that require `--yes` include `context delete`.
-
 
 ## 3. OS keychain
 
@@ -139,7 +140,7 @@ Around daylight saving changes, a local time that does not exist (such as 01:30 
 
 The selector gains a fourth rule, after the order number:
 
-4. **Words from the task name**, matched within the current project's open tasks (see the matching rules below).
+**Rule 4: words from the task name**, matched within the current project's open tasks (see the matching rules below).
 
 **Name matching (rule 4).** Lexical only; no fuzzy or semantic matching.
 

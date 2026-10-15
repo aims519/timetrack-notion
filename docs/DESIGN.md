@@ -6,7 +6,7 @@ Status: design draft, v1 scope. Binary name `tt` is a placeholder. Deferred feat
 
 ## 1. Scope
 
-**In v1**
+**In v1:**
 
 - Start/stop a single timer, with or without a task; log time after the fact (`add`, backdated `start`/`stop`).
 - Attach tasks to entries later; edit and delete entries.
@@ -99,7 +99,9 @@ Tables: `contexts`, `entries`, `tasks`, `projects`, `cache_state`, `schema_migra
 
 Each table is listed as **Column | Notes**. A `*` after a column name marks it **nullable**; every other column is `NOT NULL`. PK is primary key, FK is foreign key. Timestamps are UTC.
 
-**contexts** (exactly one row in v1)
+### `contexts`
+
+Exactly one row in v1.
 
 | Column | Notes |
 |---|---|
@@ -115,7 +117,7 @@ The first migration inserts the single row, local-only. Each migration re-checks
 
 While local-only, `start`, `stop`, `add`, `edit`, `delete`, `list` and `status` work with descriptions; `--task`, `--pick`, `attach`, `task` and `sync` fail with `not_initialised` (exit 5). `init` keeps the context's ID, so earlier entries simply remain, waiting to be attached.
 
-**entries**
+### `entries`
 
 | Column | Notes |
 |---|---|
@@ -135,12 +137,14 @@ While local-only, `start`, `stop`, `add`, `edit`, `delete`, `list` and `status` 
 
 One running timer is enforced by a partial unique index on a constant (indexing a nullable column wouldn't work, as SQLite treats NULLs as distinct):
 
-```
+```sql
 CREATE UNIQUE INDEX one_running ON entries ((1))
   WHERE end_utc IS NULL AND deleted_at IS NULL;
 ```
 
-**tasks** (read-only cache of the tasks database)
+### `tasks`
+
+A read-only cache of the tasks database.
 
 | Column | Notes |
 |---|---|
@@ -155,7 +159,9 @@ CREATE UNIQUE INDEX one_running ON entries ((1))
 
 Tasks with `gone_at` set keep their names for display but are excluded from matching, the picker and `task list`. Short IDs are derived from the cached page IDs, not stored.
 
-**projects** (read-only cache of the projects database)
+### `projects`
+
+A read-only cache of the projects database.
 
 | Column | Notes |
 |---|---|
@@ -164,7 +170,9 @@ Tasks with `gone_at` set keep their names for display but are excluded from matc
 | `name` | |
 | `gone_at`* | As for `tasks`. |
 
-**cache_state** (one row per context; timestamps are null until the first refresh of each kind)
+### `cache_state`
+
+One row per context. Its timestamps are null until the first refresh of each kind.
 
 | Column | Notes |
 |---|---|
@@ -174,7 +182,7 @@ Tasks with `gone_at` set keep their names for display but are excluded from matc
 | `tasks_full_refreshed_at`* | Last full refresh. |
 | `projects_refreshed_at`* | Last projects refresh. |
 
-**schema_migrations**
+### `schema_migrations`
 
 | Column | Notes |
 |---|---|
@@ -187,7 +195,7 @@ Migrations are forward-only, run at startup, one transaction each. A database fr
 
 Needs a Notion internal integration shared on a parent page above the projects and tasks databases (an integration sees only pages shared with it, and a relation doesn't grant access).
 
-```
+```text
 Parent page (shared with the integration)
 ├── Projects       (existing database)
 ├── Tasks          (existing database)
@@ -252,7 +260,7 @@ Ctrl-C lets the in-flight request finish, saves state and exits cleanly.
 
 ### 6.4 Output and exit codes
 
-```
+```text
 $ tt sync
 synced   Local store for time entries   1h 12m
 synced   Timer commands                 45m
@@ -286,7 +294,7 @@ Command errors are local, immediate and never retried: nothing running, a timer 
 
 Table output is for people and may change. **JSON output (`--output json`) is the contract.**
 
-**Conventions**
+### Conventions
 
 - One JSON document on stdout, with a top-level `schema_version`, printed compactly on a single line (pipe through `jq` to read it). The examples below are indented for reading only.
 - Mutating commands return the resulting entry under `entry`, so no follow-up `list` is needed.
@@ -297,7 +305,7 @@ Table output is for people and may change. **JSON output (`--output json`) is th
 - `list` and `task list` accept `--limit N` and include `truncated`: `true` when more rows matched than were returned, so a script knows it isn't seeing everything. Totals still cover every matching row: `list`'s `total_minutes` is the same with or without `--limit`.
 - Order is part of the contract: `list` chronological; `task list` by Order, then name, unordered last.
 
-**Entry object**
+### Entry object
 
 ```json
 {
@@ -320,7 +328,9 @@ Table output is for people and may change. **JSON output (`--output json`) is th
 
 `task` is `null` when unattached; `end`, `seconds` and `minutes` are `null` while running. `minutes` follows §5.
 
-**Task item** (in `task list` and in `ambiguous_selector` candidates)
+### Task item
+
+Used in `task list` and in `ambiguous_selector` candidates.
 
 ```json
 {
@@ -336,7 +346,7 @@ Table output is for people and may change. **JSON output (`--output json`) is th
 }
 ```
 
-**`sync` document**
+### `sync` document
 
 `results` has one object per entry this run touched: `entry_id`, `state` (`synced`, `failed` or `blocked`), and `error` (`{"code", "message"}`, `null` when synced). Waiting entries aren't touched, so they appear only in the `summary` count. `still_blocked` counts entries blocked by earlier runs that this run left alone. An entry's own outcome goes only in its `error`; `warnings` holds notices about the run as a whole, such as a pause for rate limiting.
 
@@ -364,7 +374,7 @@ Table output is for people and may change. **JSON output (`--output json`) is th
 
 This is the run shown in §6.4, and it exits 1. Per-entry codes are `rate_limited` and `server_error` for `failed`, and `task_not_found`, `row_missing` and `bad_request` for `blocked`. They describe one entry's outcome, never a failed command. A run that ends in exit 6 is a failed command and writes an error document instead (Errors, below).
 
-**Documents by command**
+### Documents by command
 
 | Command | Keys (besides `schema_version`) |
 |---|---|
@@ -399,6 +409,8 @@ Example, `tt status` before `init`:
   "warnings": []
 }
 ```
+
+### Streams, prompts and errors
 
 **Streams.** Data to stdout; diagnostics, warnings and errors to stderr. No colour or spinners when stdout isn't a terminal or `NO_COLOR` is set.
 
@@ -438,7 +450,7 @@ The Notion token comes only from `NOTION_TOKEN`. It is never a flag (shell histo
 
 ## 10. Implementation notes
 
-**Constraints**
+### Constraints
 
 - Single static Go binary; pure-Go SQLite driver (no cgo); embedded timezone database (`time/tzdata`) so `TT_TIMEZONE` works in minimal containers.
 - No optional-value flags (pflag can't take the next argument as their value), so either Cobra or stdlib `flag` works.
@@ -449,7 +461,7 @@ The Notion token comes only from `NOTION_TOKEN`. It is never a flag (shell histo
 - `time.Date` doesn't flag non-existent or repeated local times; detect them by converting back and comparing.
 - Have the sync engine return a per-entry outcome and count untouched blocked entries separately, so the exit code is a pure function of the counts.
 
-**Tests that must exist**
+### Tests that must exist
 
 - Two running rows: the second insert fails.
 - First run: timing before `init`, then `init` connecting with entries intact.
@@ -463,7 +475,7 @@ The Notion token comes only from `NOTION_TOKEN`. It is never a flag (shell histo
 
 Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to [DESIGN-LATER.md](DESIGN-LATER.md).
 
-**Open**
+### Open questions
 
 - **2.** A selector matching nothing is an error even if the task was created seconds ago and the refresh timed out. Revisit if annoying.
 - **6.** How often to run a full task refresh, to notice deleted tasks.
@@ -472,7 +484,7 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **9.** Overlaps are allowed with a warning; rejecting them without `--force` would stop double counting at the cost of friction. Revisit after real use.
 - **19.** Probe still needed: archiving an already-archived page, and retrieving a trashed page reporting `in_trash` (§6.1, §6.3).
 
-**Resolved**
+### Resolved
 
 - **1.** `init` can create the `Minutes` formula and a rollup via the API (spike, 13 Oct). v1 creates the formula and prints rollup steps.
 - **3.** Stale-timer threshold fixed at 12h in v1.

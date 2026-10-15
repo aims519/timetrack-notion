@@ -1,6 +1,6 @@
 # timetrack-notion — Design Notes
 
-A small Go CLI for tracking time against tasks. It works fully offline, stores everything in a local SQLite database, and syncs completed entries to Notion.
+A small Go CLI for tracking time against tasks. It works fully offline, stores tracked times along with a read-only cache of associated Notion tasks/projects in a local SQLite database, and syncs completed entries to Notion.
 
 Status: design draft, v1 scope. Binary name `tt` is a placeholder. Features deferred from v1 are described in [DESIGN-LATER.md](DESIGN-LATER.md). Open questions are in §11.
 

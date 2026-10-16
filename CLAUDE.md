@@ -8,6 +8,8 @@
 
 Design for the project lives in [docs/DESIGN.md](docs/DESIGN.md) and should always be the source of truth. It may be changed during the course of the project but only with express permission from the owner.
 
+[docs/DESIGN-LATER.md](docs/DESIGN-LATER.md) holds features deferred from v1. It is not part of v1: don't build or review code against it unless the owner brings a feature back into `DESIGN.md`.
+
 ## Authorship
 
 This is a learning project for the author, designed to increase their proficiency with the go language. Therefore, the following rules must be respected:
@@ -46,7 +48,7 @@ CI runs the same checks (`.github/workflows/ci.yml`).
 
 Details are in [docs/DESIGN.md](docs/DESIGN.md); these are the ones to check code and reviews against.
 
-- The Notion token is never stored in a file or the database, and never accepted as a flag. It comes from `NOTION_TOKEN` or the OS keychain (§9)
+- The Notion token is never stored in a file or the database, and never accepted as a flag. In v1 it comes from `NOTION_TOKEN` only (§9)
 - One writer for sync: every sync takes the sync lock before reading any entry (§6.5)
-- Commit locally before any network call. A failed or timed-out sync never loses or fails a change (§6.5)
+- Commit locally before any network call, and never hold a transaction across one. A failed sync never loses a change (§4, §6.3)
 - JSON output is the contract. Table output is for humans and may change (§8)

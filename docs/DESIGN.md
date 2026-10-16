@@ -465,6 +465,21 @@ Example, `tt status` before `init`:
 | `database_too_new` | `{"database_version": n, "supported_version": n}` |
 | `database_unusable` | `{"path": "..."}` |
 
+Example, `tt start -t 999` when no open task has order number 999 (stderr, exit 3):
+
+```json
+{
+  "schema_version": 1,
+  "error": {
+    "code": "not_found",
+    "message": "no task matches \"999\"",
+    "details": {
+      "selector": "999"
+    }
+  }
+}
+```
+
 Every command has `--help` with examples.
 
 ## 9. Secrets

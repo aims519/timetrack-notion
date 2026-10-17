@@ -1,6 +1,7 @@
 package output
 
 import (
+	"bytes"
 	"errors"
 	"maps"
 	"testing"
@@ -70,5 +71,22 @@ func TestErrorDoc_Marshal_KeysPresentAndCorrect(t *testing.T) {
 				t.Errorf("Got ErrorDoc.Error.Details = %v, want %v", detailsMap, tc.err.Details)
 			}
 		})
+	}
+}
+
+func TestErrorDoc_WriteTable_WritesExpectedOutput(t *testing.T) {
+	doc := ErrorDoc{Error: clierr.Error{Message: "expected message"}}
+	w := &bytes.Buffer{}
+
+	err := doc.WriteTable(w)
+	if err != nil {
+		t.Fatalf("WriteTable() error = %v", err)
+	}
+
+	got := w.String()
+	want := "expected message\n"
+
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

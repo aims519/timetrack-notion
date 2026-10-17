@@ -1,9 +1,7 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -20,27 +18,20 @@ func exitCode(err error) int {
 	return clierr.Internal.ExitCode() // unknown internal error
 }
 
-// printError writes err to w in format f. An error that is not a *clierr.Error is
-// reported as internal. If the JSON document cannot be marshaled, details are
-// dropped so the output is still a valid error document.
+// printError creates an ErrorDoc and passes it to output.Write,
+// which handles writing for the specified format
 func printError(w io.Writer, f output.Format, err error) {
 	var cliError *clierr.Error
 	if !errors.As(err, &cliError) {
 		cliError = &clierr.Error{Code: clierr.Internal, Message: err.Error(), Cause: err}
 	}
 
-	if f == output.Table {
-		_, _ = fmt.Fprintf(w, "%s\n", cliError.Message)
-	} else {
-		errorJSONDoc := output.NewErrorDoc(*cliError)
-		jsonData, marshalErr := json.Marshal(errorJSONDoc)
+	errorDoc := output.NewErrorDoc(*cliError)
+	writeErr := output.Write(w, f, errorDoc)
 
-		// If marshaling fails, remove details object as a fallback
-		if marshalErr != nil {
-			errorJSONDoc.Error.Details = nil
-			jsonData, _ = json.Marshal(errorJSONDoc)
-		}
-
-		_, _ = fmt.Fprintf(w, "%s\n", jsonData)
+	// If writing fails, remove Details from errorDoc and try again
+	if writeErr != nil {
+		errorDoc.Error.Details = nil
+		_ = output.Write(w, f, errorDoc)
 	}
 }

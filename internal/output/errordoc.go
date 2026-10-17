@@ -1,6 +1,11 @@
 package output
 
-import "github.com/aims519/timetrack-notion/internal/clierr"
+import (
+	"fmt"
+	"io"
+
+	"github.com/aims519/timetrack-notion/internal/clierr"
+)
 
 type ErrorDoc struct {
 	BaseSchema
@@ -9,4 +14,10 @@ type ErrorDoc struct {
 
 func NewErrorDoc(e clierr.Error) ErrorDoc {
 	return ErrorDoc{BaseSchema: BaseSchema{SchemaVersion}, Error: e}
+}
+
+// Write tabular output
+func (d ErrorDoc) WriteTable(w io.Writer) error {
+	_, err := fmt.Fprintln(w, d.Error.Message)
+	return err
 }

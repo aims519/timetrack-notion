@@ -116,7 +116,9 @@ Entries display their description, else the task name. Descriptions are at most 
 
 ## 4. Data model
 
-One **SQLite database** (pure-Go driver) in the user data directory, overridden by `TT_DB`. There is no config file: the context lives in the same database as the entries, so they can't drift apart and one backup covers both. Tokens are never stored (§9).
+One **SQLite database** (pure-Go driver) in the data directory, overridden by `TT_DB`. There is no config file: the context lives in the same database as the entries, so they can't drift apart and one backup covers both. Tokens are never stored (§9).
+
+**Location.** By default the database is `tt.db` in `$XDG_DATA_HOME/tt` on any OS. If `XDG_DATA_HOME` is unset, empty or not an absolute path, it's in `%LOCALAPPDATA%\tt` on Windows and `~/.local/share/tt` everywhere else, including macOS (not `~/Library/Application Support`). `TT_DB` is the path to the database file itself and is used whenever it's set; set but empty, it fails with `database_unusable`, and only an unset `TT_DB` falls back to the default. The **data directory** is whichever directory holds the database, so with `TT_DB` set it's that file's parent; the sync lock (§6.5) lives there too. `tt` creates the default data directory (mode `0700`) if it's missing, but never the parent of a `TT_DB` path: if that doesn't exist, the command fails with `database_unusable`.
 
 Tables: `contexts`, `entries`, `tasks`, `projects`, `cache_state`, `schema_migrations`. Context-owned tables carry `context_id` (a foreign key to `contexts.id`), so adding contexts later needs no migration of them. Foreign keys are on; WAL mode with a busy timeout lets a command run while a sync does. **Every command commits locally before any network call, and no transaction spans one.** If the database is lost, `init` rebuilds the context from Notion; only unsynced entries are lost.
 
@@ -305,7 +307,7 @@ The JSON form of the same result is the `sync` document in §8.
 
 ### 6.5 Sync lock and scheduled sync
 
-Every sync takes an advisory file lock in the data directory before reading any entry and holds it for the run (the OS releases it if the process dies). If it's held, `tt sync` fails with `sync_busy` (exit 4). Only sync takes the lock.
+Every sync takes an advisory file lock next to the database (the database file's name plus `.lock`, in the data directory, §4) before reading any entry and holds it for the run (the OS releases it if the process dies). If it's held, `tt sync` fails with `sync_busy` (exit 4). Only sync takes the lock.
 
 A cron job or launchd agent running `tt sync --no-input` works as is: it exits 1 once per new problem, and an overlap with a manual sync just exits 4. The tool doesn't install the job.
 
@@ -534,3 +536,4 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **16.** The context lives in SQLite with the entries; no config file.
 - **17.** Query-after-create is consistent (40 creates, no misses or duplicates in the spike), so there's no post-sync duplicate check. Editing a trashed page returns 400; trashed pages don't appear in `Local ID` queries.
 - **18.** Network failures are counted per attempt; 3 in a row stop the run with entries left `pending` (exit 6); `failed` is only for persistent 429/5xx.
+- **20.** The data directory follows XDG: `$XDG_DATA_HOME/tt` on any OS, else `%LOCALAPPDATA%\tt` on Windows (local, not roaming, because a database shouldn't sync between machines) and `~/.local/share/tt` elsewhere. It's always the directory holding the database, and each database gets its own lock file beside it, so two databases never share a lock. An empty `TT_DB` is an error, not a request for the default, and a `TT_DB` path's parent must already exist. Rejected: a visible `~/tt` (clutters the home directory) and `~/Library/Application Support` on macOS (awkward to type, and developer CLIs commonly use XDG there).

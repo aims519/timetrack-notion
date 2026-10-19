@@ -40,6 +40,12 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 
 	connPool.SetMaxOpenConns(openMaxConnections)
 
+	err = applyMigrations(ctx, connPool, dbPath)
+	if err != nil {
+		_ = connPool.Close()
+		return nil, err
+	}
+
 	return &Store{connectionPool: connPool}, nil
 }
 

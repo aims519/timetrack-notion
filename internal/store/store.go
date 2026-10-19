@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -28,13 +29,13 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 	dsn := buildDSN(dbPath)
 	connPool, err := sql.Open(driverName, dsn)
 	if err != nil {
-		return nil, &clierr.Error{Code: clierr.Internal, Message: "dsn or driver name incorrect", Cause: err}
+		return nil, &clierr.Error{Code: clierr.Internal, Message: fmt.Sprintf("dsn or driver name incorrect: %v", err), Cause: err}
 	}
 
 	err = connPool.PingContext(ctx)
 	if err != nil {
 		_ = connPool.Close()
-		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "db PingContext() failed", Cause: err, Details: map[string]any{"path": dbPath}}
+		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: fmt.Sprintf("can't open database at %q: %v", dbPath, err), Cause: err, Details: map[string]any{"path": dbPath}}
 	}
 
 	connPool.SetMaxOpenConns(openMaxConnections)

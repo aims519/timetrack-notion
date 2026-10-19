@@ -17,7 +17,7 @@ func TestOpen_Errors(t *testing.T) {
 		{name: "empty", setup: func(t *testing.T) string { return "" }},
 		{name: "special_character", setup: func(t *testing.T) string { return filepath.Join(t.TempDir(), "t?st.db") }},
 		{name: "path_is_directory", setup: func(t *testing.T) string { return t.TempDir() }},
-		{name: "directory_does_not_exist", setup: func(t *testing.T) string { return filepath.Join(t.TempDir(), "/missing/test.db") }},
+		{name: "directory_does_not_exist", setup: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing/test.db") }},
 		{name: "not_a_db_file",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()

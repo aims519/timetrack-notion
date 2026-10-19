@@ -138,7 +138,7 @@ Exactly one row in v1.
 | `default_project_page_id`* | Null if no default project. |
 | `created_at` | |
 
-The first migration inserts the single row, local-only. Each migration re-checks the schema version under `BEGIN IMMEDIATE`, so concurrent first runs create one row.
+The first migration inserts the single row, local-only. Goose reads the schema version once and doesn't re-check it inside each migration's transaction, so two concurrent first runs would both apply the first migration. Opening the database therefore holds a lock file beside it across the first open and the migrations, so concurrent first runs create one row ([#9](https://github.com/aims519/timetrack-notion/issues/9)).
 
 While local-only, `start`, `stop`, `add`, `edit`, `delete`, `list` and `status` work with descriptions; `--task`, `--pick`, `attach`, `task` and `sync` fail with `not_initialised` (exit 5). `init` keeps the context's ID, so earlier entries simply remain, waiting to be attached.
 
@@ -209,10 +209,16 @@ One row per context. Its timestamps are null until the first refresh of each kin
 
 ### `schema_migrations`
 
+Created and written by [goose](https://github.com/pressly/goose), which runs the migrations; `tt` only reads it. The layout is goose's, not ours:
+
 | Column | Notes |
 |---|---|
-| `version` | PK. |
-| `applied_at` | |
+| `id` | PK, `AUTOINCREMENT`. |
+| `version_id` | The migration's version. Goose also inserts a version `0` row when it creates the table. |
+| `is_applied` | `1` for an applied migration. Always `1` here, since migrations never go down. |
+| `tstamp` | When it was applied, as SQLite's `datetime('now')` (UTC, not RFC 3339). |
+
+The database's schema version is the highest applied `version_id`. Migrations are SQL files embedded in the binary, numbered sequentially from 1 with no gaps (`0001_initial_schema.sql`, `0002_entries.sql`, …); a test enforces the numbering.
 
 Migrations are forward-only, run at startup, one transaction each. A database from a newer binary is never touched (`database_too_new`, exit 5); an unreadable one is `database_unusable` (exit 5).
 
@@ -537,3 +543,4 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **17.** Query-after-create is consistent (40 creates, no misses or duplicates in the spike), so there's no post-sync duplicate check. Editing a trashed page returns 400; trashed pages don't appear in `Local ID` queries.
 - **18.** Network failures are counted per attempt; 3 in a row stop the run with entries left `pending` (exit 6); `failed` is only for persistent 429/5xx.
 - **20.** The data directory follows XDG: `$XDG_DATA_HOME/tt` on any OS, else `%LOCALAPPDATA%\tt` on Windows (local, not roaming, because a database shouldn't sync between machines) and `~/.local/share/tt` elsewhere. It's always the directory holding the database, and each database gets its own lock file beside it, so two databases never share a lock. An empty `TT_DB` is an error, not a request for the default, and a `TT_DB` path's parent must already exist. Rejected: a visible `~/tt` (clutters the home directory) and `~/Library/Application Support` on macOS (awkward to type, and developer CLIs commonly use XDG there).
+- **21.** Migrations run with goose, so `schema_migrations` has goose's layout (§4) rather than `(version, applied_at)`, and files are numbered sequentially rather than by timestamp. Goose doesn't re-check the version inside each migration's transaction, so concurrent first runs are serialised with a lock file instead ([#9](https://github.com/aims519/timetrack-notion/issues/9)). Rejected: a hand-written runner (more code to own for no v1 gain) and idempotent migrations (goose would still record a version twice).

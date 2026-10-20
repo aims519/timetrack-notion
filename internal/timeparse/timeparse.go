@@ -52,6 +52,31 @@ func Parse(input string, now time.Time, loc *time.Location) (time.Time, error) {
 	return t.UTC(), nil
 }
 
+// ParseAgo reads the --ago value and returns a UTC result in the past
+func ParseAgo(input string, now time.Time) (time.Time, error) {
+	d, err := ParseDuration(input)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return now.Add(-1 * d).UTC(), nil
+}
+
+// ParseDuration reads a duration passed in via --ago or --duration
+// Duration should not be negative
+func ParseDuration(input string) (time.Duration, error) {
+	d, err := time.ParseDuration(input)
+	if err != nil {
+		return 0, &clierr.Error{Code: clierr.InvalidTime, Message: "unable to parse duration, require e.g. 10m or 1h15m", Cause: err, Details: map[string]any{"input": input}}
+	}
+
+	if d < 0 {
+		return 0, &clierr.Error{Code: clierr.InvalidTime, Message: "negative durations aren't allowed", Details: map[string]any{"input": input}}
+	}
+
+	return d, nil
+}
+
 // parseRFC3339 reads an RFC 3339 time. Its offset names a single instant,
 // so unlike a wall-clock time it can't be missing or repeated
 func parseRFC3339(input string, now time.Time) (time.Time, error) {

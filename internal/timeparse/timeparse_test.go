@@ -105,6 +105,89 @@ func TestCurrentLocation_ValidNoEnv(t *testing.T) {
 	}
 }
 
+func TestParseAgo_Valid(t *testing.T) {
+	tests := []struct {
+		name string
+		ago  string
+		now  time.Time
+		want string
+	}{
+		{name: "utc_zero", ago: "0m", now: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC), want: "2026-01-01T01:00:00Z"},
+		{name: "utc_minutes", ago: "5m", now: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC), want: "2026-01-01T00:55:00Z"},
+		{name: "utc_hours", ago: "2h", now: time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC), want: "2026-01-01T00:00:00Z"},
+		{name: "utc_hours_and_minutes", ago: "3h45m", now: time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC), want: "2026-01-01T00:15:00Z"},
+		{name: "utc_over_1_day", ago: "25h30m", now: time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC), want: "2026-01-01T22:30:00Z"},
+		{name: "utc_crossing_day", ago: "1h30m", now: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC), want: "2025-12-31T23:30:00Z"},
+		{name: "london_valid", ago: "1h30m", now: time.Date(2026, 1, 1, 12, 0, 0, 0, londonTZ(t)), want: "2026-01-01T10:30:00Z"},
+		{name: "london_bst_converts_utc", ago: "1h", now: time.Date(2026, 05, 1, 12, 0, 0, 0, londonTZ(t)), want: "2026-05-01T10:00:00Z"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ti, err := ParseAgo(tc.ago, tc.now)
+			if err != nil {
+				t.Fatalf("got error %v", err)
+			}
+
+			if got := ti.Format(time.RFC3339); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAgo_Invalid(t *testing.T) {
+	tests := []struct {
+		name string
+		ago  string
+		now  time.Time
+	}{
+		{name: "utc_invalid_duration", ago: "5t", now: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)},
+		{name: "utc_empty_duration", ago: "", now: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)},
+		{name: "utc_negative", ago: "-1h", now: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)},
+		{name: "utc_day", ago: "1d", now: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseAgo(tc.ago, tc.now)
+
+			var cliErr *clierr.Error
+			if !errors.As(err, &cliErr) {
+				t.Fatalf("want clierr.Error, got %v", err)
+			}
+
+			if cliErr.Code != clierr.InvalidTime {
+				t.Errorf("got %v, want %v", cliErr.Code, clierr.InvalidTime)
+			}
+		})
+	}
+}
+
+func TestParseDuration_Invalid(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "utc_invalid_duration", input: "5t"},
+		{name: "utc_empty_duration", input: ""},
+		{name: "utc_negative", input: "-1h"},
+		{name: "utc_day", input: "1d"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseDuration(tc.input)
+
+			var cliErr *clierr.Error
+			if !errors.As(err, &cliErr) {
+				t.Fatalf("want clierr.Error, got %v", err)
+			}
+
+			if cliErr.Code != clierr.InvalidTime {
+				t.Errorf("got %v, want %v", cliErr.Code, clierr.InvalidTime)
+			}
+		})
+	}
+}
+
 func TestParse_Valid(t *testing.T) {
 	tests := []struct {
 		name  string

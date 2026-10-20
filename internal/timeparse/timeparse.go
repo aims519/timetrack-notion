@@ -2,6 +2,7 @@ package timeparse
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -9,32 +10,53 @@ import (
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
 
-func ValidTime(input string, layout string, loc *time.Location, now time.Time) (*time.Time, error) {
+// CurrentLocation returns the system time.Location
+// unless a valid TT_TIMEZONE environment variable is set
+func CurrentLocation() (*time.Location, error) {
+	tz, exists := os.LookupEnv("TT_TIMEZONE")
+	if exists {
+		if tz == "" {
+			return nil, &clierr.Error{Code: clierr.Usage, Message: "TT_TIMEZONE set and empty"}
+		}
+
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return nil, &clierr.Error{Code: clierr.Usage, Message: fmt.Sprintf("invalid TT_TIMEZONE %q", tz), Cause: err}
+		}
+
+		return loc, nil
+	}
+
+	// use system TZ by default
+	return time.Local, nil
+}
+
+func ValidTime(input string, layout string, loc *time.Location, now time.Time) (time.Time, error) {
 	pickedInstant, err := time.ParseInLocation(layout, input, loc)
 	if err != nil {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: "could not be parsed with location", Cause: err, Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "could not be parsed with location", Cause: err, Details: map[string]any{"input": input}}
 	}
 
 	if pickedInstant.After(now) {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: "time is in the future", Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "time is in the future", Details: map[string]any{"input": input}}
 	}
 
 	readingAsUTC, err := time.Parse(layout, input)
 	if err != nil {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: "could not be parsed", Cause: err, Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "could not be parsed", Cause: err, Details: map[string]any{"input": input}}
 	}
 
 	// Check time exists (formatted picked instant matches formatted intended reading)
 	want := readingAsUTC.Format(layout)
 	if got := pickedInstant.Format(layout); got != want {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: "time does not exist, provide an offset", Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "time does not exist, provide an offset", Details: map[string]any{"input": input}}
 	}
 
 	if timeRepeats(pickedInstant, readingAsUTC, layout, loc) {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: "time is ambiguous, provide an offset", Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "time is ambiguous, provide an offset", Details: map[string]any{"input": input}}
 	}
 
-	return &pickedInstant, nil
+	return pickedInstant, nil
 }
 
 // timeRepeats checks for ambiguous times, i.e. a time that repeats
@@ -72,26 +94,26 @@ func timeRepeats(picked time.Time, readingAsUTC time.Time, layout string, loc *t
 }
 
 // TodayAtHHMM returns a time on the current day at input (HH:MM)
-func TodayAtHHMM(input string, now time.Time, loc *time.Location) (*time.Time, error) {
+func TodayAtHHMM(input string, now time.Time, loc *time.Location) (time.Time, error) {
 	segments := strings.Split(input, ":")
 	if len(segments) != 2 {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: "required format HH:MM", Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "required format HH:MM", Details: map[string]any{"input": input}}
 	}
 
 	hours, err := strconv.Atoi(segments[0])
 	if err != nil {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid hour", segments[0]), Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid hour", segments[0]), Details: map[string]any{"input": input}}
 	}
 	if hours < 0 || hours > 23 {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid hour", hours), Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid hour", hours), Details: map[string]any{"input": input}}
 	}
 
 	minutes, err := strconv.Atoi(segments[1])
 	if err != nil {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid minute", segments[1]), Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid minute", segments[1]), Details: map[string]any{"input": input}}
 	}
 	if minutes < 0 || minutes > 59 {
-		return nil, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid minute", minutes), Details: map[string]any{"input": input}}
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: fmt.Sprintf("%v is not a valid minute", minutes), Details: map[string]any{"input": input}}
 	}
 
 	year, month, day := now.In(loc).Date()

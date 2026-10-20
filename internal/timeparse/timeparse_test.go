@@ -2,6 +2,7 @@ package timeparse
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -23,6 +24,85 @@ func londonTZ(t *testing.T) *time.Location {
 	}
 
 	return loc
+}
+
+func resetEnv(t *testing.T) {
+	// clean up any local env, restored after test
+	t.Setenv("TT_TIMEZONE", "")
+	err := os.Unsetenv("TT_TIMEZONE")
+	if err != nil {
+		t.Fatalf("error unsetting TT_TIMEZONE: %v", err)
+	}
+}
+
+func TestCurrentLocation_ValidEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		tz   string
+		want string
+	}{
+		{name: "valid_env", tz: "Europe/London", want: "Europe/London"},
+		{name: "valid_env", tz: "UTC", want: "UTC"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetEnv(t)
+
+			t.Setenv("TT_TIMEZONE", tc.tz)
+
+			loc, err := CurrentLocation()
+			if err != nil {
+				t.Fatalf("error reading location %v", err)
+			}
+
+			if got := loc.String(); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCurrentLocation_InvalidEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		tz       string
+		wantCode clierr.ErrorCode
+		setEnv   func(t *testing.T) clierr.ErrorCode
+	}{
+		{name: "invalid_env", tz: "Junk/TZ", wantCode: clierr.Usage},
+		{name: "empty", tz: "", wantCode: clierr.Usage},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetEnv(t)
+
+			t.Setenv("TT_TIMEZONE", tc.tz)
+
+			_, err := CurrentLocation()
+
+			var cliErr *clierr.Error
+			if !errors.As(err, &cliErr) {
+				t.Fatalf("want clierr.Error, got %v", err)
+			}
+
+			if cliErr.Code != tc.wantCode {
+				t.Errorf("want %q, got %q", tc.wantCode, cliErr.Code)
+			}
+		})
+	}
+}
+
+func TestCurrentLocation_ValidNoEnv(t *testing.T) {
+	resetEnv(t)
+
+	got, err := CurrentLocation()
+	if err != nil {
+		t.Fatalf("unable to retrieve location %v", err)
+	}
+
+	if got != time.Local {
+		t.Errorf("got %v, want %v", got, time.Local)
+	}
 }
 
 func TestValidTime_Valid(t *testing.T) {

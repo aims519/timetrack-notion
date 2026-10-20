@@ -11,7 +11,7 @@ import (
 
 func nowUTC(t *testing.T) time.Time {
 	t.Helper()
-	return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	return time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
 }
 
 func londonTZ(t *testing.T) *time.Location {
@@ -42,7 +42,7 @@ func TestCurrentLocation_ValidEnv(t *testing.T) {
 		want string
 	}{
 		{name: "valid_env", tz: "Europe/London", want: "Europe/London"},
-		{name: "valid_env", tz: "UTC", want: "UTC"},
+		{name: "valid_env_utc", tz: "UTC", want: "UTC"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,52 +105,124 @@ func TestCurrentLocation_ValidNoEnv(t *testing.T) {
 	}
 }
 
-func TestValidTime_Valid(t *testing.T) {
+func TestParse_Valid(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  string
-		layout string
+		name  string
+		input string
+		want  string
 	}{
-		// {name: "hhmm", input: "1:30", layout: "04:05"},    // layout HH:MM
-		{name: "rfc3339", input: "2026-09-20T14:30:55Z", layout: time.RFC3339}, // layout YYYY-MM-DDTHH:mm:ssZ
+		{name: "hhmm", input: "09:30", want: "2026-10-24T08:30:00Z"},
+		{name: "rfc3339_utc", input: "2026-10-24T11:00:00Z", want: "2026-10-24T11:00:00Z"},
+		{name: "rfc3339_offset", input: "2026-10-24T12:00:00+01:00", want: "2026-10-24T11:00:00Z"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			loc := londonTZ(t)
+			now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC) // 13:00 BST
+
+			ti, err := Parse(tc.input, now, loc)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if ti.Location() != time.UTC {
+				t.Errorf("got location %v, want UTC", ti.Location())
+			}
+
+			if got := ti.Format(time.RFC3339); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParse_Error(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "junk", input: "junk"},
+		{name: "space_separator", input: "2026-10-24 12:00"},
+		{name: "hhmm_future", input: "14:00"},
+		{name: "rfc3339_future", input: "2026-10-24T12:30:00Z"},
+		{name: "rfc3339_lowercase", input: "2026-10-24t12:30:00Z"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			loc := londonTZ(t)
+			now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC) // 13:00 BST
+
+			_, err := Parse(tc.input, now, loc)
+
+			var cliErr *clierr.Error
+			if !errors.As(err, &cliErr) {
+				t.Fatalf("expected clierr.Error, got %v", err)
+			}
+
+			if cliErr.Code != clierr.InvalidTime {
+				t.Errorf("got %v, want %v", cliErr.Code, clierr.InvalidTime)
+			}
+		})
+	}
+}
+
+func TestParseRFC3339_Valid(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "rfc3339", input: "2026-09-20T14:30:55Z", want: "2026-09-20T14:30:55Z"},
+		// The day before a DST change, which timeRepeats once flagged as ambiguous
+		{name: "rfc3339_offset", input: "2026-10-24T12:00:00+01:00", want: "2026-10-24T11:00:00Z"},
+		// The repeated 01:30 on the DST change day, made unambiguous by the offset
+		{name: "rfc3339_repeated_bst", input: "2026-10-25T01:30:00+01:00", want: "2026-10-25T00:30:00Z"},
+		{name: "rfc3339_repeated_gmt", input: "2026-10-25T01:30:00+00:00", want: "2026-10-25T01:30:00Z"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			now := nowUTC(t)
 
-			_, err := ValidTime(tc.input, tc.layout, time.UTC, now)
+			ti, err := parseRFC3339(tc.input, now)
 			if err != nil {
-				t.Errorf("expected nil, got %v", err)
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got := ti.UTC().Format(time.RFC3339); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestValidTime_Invalid(t *testing.T) {
+func TestParseRFC3339_Error(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  string
-		layout string
+		name  string
+		input string
 	}{
-		{name: "layout_mismatch_hhmm", input: "1:30", layout: "04:05"},                // layout HH:MM
-		{name: "layout_mismatch_rcc3339", input: "2006-", layout: time.RFC3339},       // layout YYYY-MM-DDTHH:mm:ssZ
-		{name: "future_rcc3339", input: "2026-11-20T14:30:55Z", layout: time.RFC3339}, // layout YYYY-MM-DDTHH:mm:ssZ
+		{name: "malformed", input: "2006-"},
+		{name: "no_offset", input: "2026-10-24T12:00:00"},
+		{name: "future", input: "2026-11-20T14:30:55Z"},
 	}
 	for _, tc := range tests {
-		now := nowUTC(t)
-
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ValidTime(tc.input, tc.layout, time.UTC, now)
+			now := nowUTC(t)
+
+			_, err := parseRFC3339(tc.input, now)
 
 			var cliErr *clierr.Error
 			if !errors.As(err, &cliErr) {
-				t.Errorf("expected clierr.Error, got %v", err)
+				t.Fatalf("expected clierr.Error, got %v", err)
+			}
+
+			if cliErr.Code != clierr.InvalidTime {
+				t.Errorf("got %v, want %v", cliErr.Code, clierr.InvalidTime)
 			}
 		})
 	}
 }
 
-func TestTodayHHMM_Valid(t *testing.T) {
+func TestTodayAtHHMM_Valid(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -165,7 +237,7 @@ func TestTodayHHMM_Valid(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Date(2026, 10, 01, 15, 30, 15, 0, time.UTC)
-			ti, err := TodayAtHHMM(tc.input, now, time.UTC)
+			ti, err := todayAtHHMM(tc.input, now, time.UTC)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -177,7 +249,7 @@ func TestTodayHHMM_Valid(t *testing.T) {
 	}
 }
 
-func TestTodayHHMM_ValidDSTBackwards(t *testing.T) {
+func TestTodayAtHHMM_ValidDSTBackwards(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -193,7 +265,7 @@ func TestTodayHHMM_ValidDSTBackwards(t *testing.T) {
 			loc := londonTZ(t)
 			now := time.Date(2026, 10, 25, 15, 30, 15, 0, loc) // DST change at 02:00 (-1 hr)
 
-			ti, err := TodayAtHHMM(tc.input, now, loc)
+			ti, err := todayAtHHMM(tc.input, now, loc)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -205,7 +277,7 @@ func TestTodayHHMM_ValidDSTBackwards(t *testing.T) {
 	}
 }
 
-func TestTodayHHMM_ValidDSTForwards(t *testing.T) {
+func TestTodayAtHHMM_ValidDSTForwards(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -221,7 +293,7 @@ func TestTodayHHMM_ValidDSTForwards(t *testing.T) {
 			loc := londonTZ(t)
 			now := time.Date(2026, 3, 29, 15, 30, 15, 0, loc) // DST change at 01:00 (+1 hr)
 
-			ti, err := TodayAtHHMM(tc.input, now, loc)
+			ti, err := todayAtHHMM(tc.input, now, loc)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -233,7 +305,7 @@ func TestTodayHHMM_ValidDSTForwards(t *testing.T) {
 	}
 }
 
-func TestTodayHHMM_ErrorDSTBackwards(t *testing.T) {
+func TestTodayAtHHMM_ErrorDSTBackwards(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -247,7 +319,7 @@ func TestTodayHHMM_ErrorDSTBackwards(t *testing.T) {
 			loc := londonTZ(t)
 			now := time.Date(2026, 10, 25, 15, 30, 15, 0, loc) // DST change at 02:00 (- 1hr)
 
-			_, err := TodayAtHHMM(tc.input, now, loc)
+			_, err := todayAtHHMM(tc.input, now, loc)
 			var cliErr *clierr.Error
 			if !errors.As(err, &cliErr) {
 				t.Fatalf("expected clierr.Error, got %v", err)
@@ -260,7 +332,7 @@ func TestTodayHHMM_ErrorDSTBackwards(t *testing.T) {
 	}
 }
 
-func TestTodayHHMM_ErrorDSTForwards(t *testing.T) {
+func TestTodayAtHHMM_ErrorDSTForwards(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -274,7 +346,7 @@ func TestTodayHHMM_ErrorDSTForwards(t *testing.T) {
 			loc := londonTZ(t)
 			now := time.Date(2026, 03, 29, 15, 30, 15, 0, loc) // DST change at 01:00 (+1 hr)
 
-			ti, err := TodayAtHHMM(tc.input, now, loc)
+			ti, err := todayAtHHMM(tc.input, now, loc)
 			var cliErr *clierr.Error
 			if !errors.As(err, &cliErr) {
 				t.Logf("unexpected result: %v", ti)
@@ -304,7 +376,7 @@ func TestTodayAtHHMM_Error(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Date(2026, 10, 01, 15, 30, 15, 0, time.UTC)
-			_, err := TodayAtHHMM(tc.input, now, time.UTC)
+			_, err := todayAtHHMM(tc.input, now, time.UTC)
 
 			var cliErr *clierr.Error
 			if !errors.As(err, &cliErr) {

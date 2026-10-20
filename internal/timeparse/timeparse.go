@@ -10,6 +10,8 @@ import (
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
 
+const wallClockTimeFormat = "2006-01-02T15:04:05"
+
 // CurrentLocation returns the system time.Location
 // unless a valid TT_TIMEZONE environment variable is set
 func CurrentLocation() (*time.Location, error) {
@@ -31,7 +33,46 @@ func CurrentLocation() (*time.Location, error) {
 	return time.Local, nil
 }
 
-func ValidTime(input string, layout string, loc *time.Location, now time.Time) (time.Time, error) {
+// Parse reads a time argument (--at, --start, --end) as either HH:MM,
+// meaning today in loc, or RFC 3339. The result is in UTC
+func Parse(input string, now time.Time, loc *time.Location) (time.Time, error) {
+	var t time.Time
+	var err error
+
+	// RFC 3339 always separates date and time with a T; HH:MM never has one
+	if strings.Contains(input, "T") || strings.Contains(input, "t") {
+		t, err = parseRFC3339(input, now)
+	} else {
+		t, err = todayAtHHMM(input, now, loc)
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return t.UTC(), nil
+}
+
+// parseRFC3339 reads an RFC 3339 time. Its offset names a single instant,
+// so unlike a wall-clock time it can't be missing or repeated
+func parseRFC3339(input string, now time.Time) (time.Time, error) {
+	instant, err := time.Parse(time.RFC3339, input)
+	if err != nil {
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "required format RFC 3339, e.g. 2026-10-24T12:00:00+01:00", Cause: err, Details: map[string]any{"input": input}}
+	}
+
+	if instant.After(now) {
+		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "time is in the future", Details: map[string]any{"input": input}}
+	}
+
+	return instant, nil
+}
+
+// checkWallClockTime reads input (wallClockTimeFormat, no offset) as a
+// time in loc, rejecting it if it's in the future, or doesn't exist or
+// repeats on a DST change day
+func checkWallClockTime(input string, now time.Time, loc *time.Location) (time.Time, error) {
+	layout := wallClockTimeFormat
+
 	pickedInstant, err := time.ParseInLocation(layout, input, loc)
 	if err != nil {
 		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "could not be parsed with location", Cause: err, Details: map[string]any{"input": input}}
@@ -52,7 +93,7 @@ func ValidTime(input string, layout string, loc *time.Location, now time.Time) (
 		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "time does not exist, provide an offset", Details: map[string]any{"input": input}}
 	}
 
-	if timeRepeats(pickedInstant, readingAsUTC, layout, loc) {
+	if timeRepeats(pickedInstant, readingAsUTC, loc) {
 		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "time is ambiguous, provide an offset", Details: map[string]any{"input": input}}
 	}
 
@@ -60,8 +101,11 @@ func ValidTime(input string, layout string, loc *time.Location, now time.Time) (
 }
 
 // timeRepeats checks for ambiguous times, i.e. a time that repeats
-// on a given day due to timezone offset changes
-func timeRepeats(picked time.Time, readingAsUTC time.Time, layout string, loc *time.Location) bool {
+// on a given day due to timezone offset changes. readingAsUTC must hold
+// the wall-clock reading in UTC, as parsed from wallClockTimeFormat
+func timeRepeats(picked time.Time, readingAsUTC time.Time, loc *time.Location) bool {
+	layout := wallClockTimeFormat
+
 	// Find time offsets either side of the picked instant
 	offsets := make([]int, 2)
 
@@ -93,8 +137,8 @@ func timeRepeats(picked time.Time, readingAsUTC time.Time, layout string, loc *t
 	return false
 }
 
-// TodayAtHHMM returns a time on the current day at input (HH:MM)
-func TodayAtHHMM(input string, now time.Time, loc *time.Location) (time.Time, error) {
+// todayAtHHMM returns a time on the current day in loc at input (HH:MM)
+func todayAtHHMM(input string, now time.Time, loc *time.Location) (time.Time, error) {
 	segments := strings.Split(input, ":")
 	if len(segments) != 2 {
 		return time.Time{}, &clierr.Error{Code: clierr.InvalidTime, Message: "required format HH:MM", Details: map[string]any{"input": input}}
@@ -119,7 +163,6 @@ func TodayAtHHMM(input string, now time.Time, loc *time.Location) (time.Time, er
 	year, month, day := now.In(loc).Date()
 
 	// check result is valid time before returning
-	formatWallClock := "2006-01-02T15:04:05" // YYYY-MM-DDTHH:mm:ss
 	requestedTimeStr := fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:00", year, month, day, hours, minutes)
-	return ValidTime(requestedTimeStr, formatWallClock, loc, now)
+	return checkWallClockTime(requestedTimeStr, now, loc)
 }

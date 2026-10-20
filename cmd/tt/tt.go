@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/aims519/timetrack-notion/internal/cli"
+	_ "time/tzdata"
 )
 
 func main() {

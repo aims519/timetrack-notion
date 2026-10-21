@@ -523,3 +523,32 @@ func TestValidateStartAndEnd(t *testing.T) {
 		})
 	}
 }
+
+func TestEntryMinutes(t *testing.T) {
+	tests := []struct {
+		name  string
+		start time.Time
+		end   time.Time
+		want  int
+	}{
+		{name: "whole_minutes", start: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC), end: time.Date(2026, 1, 1, 1, 5, 0, 0, time.UTC), want: 5},
+		{name: "end_seconds_only", start: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC), end: time.Date(2026, 1, 1, 1, 0, 31, 0, time.UTC), want: 0},
+		{name: "start_and_end_seconds", start: time.Date(2026, 1, 1, 1, 0, 31, 0, time.UTC), end: time.Date(2026, 1, 1, 1, 5, 31, 0, time.UTC), want: 5},
+		{name: "crossing_a_minute", start: time.Date(2026, 1, 1, 1, 0, 40, 0, time.UTC), end: time.Date(2026, 1, 1, 1, 1, 10, 0, time.UTC), want: 1},
+		{name: "one_second_one_minute", start: time.Date(2026, 1, 1, 0, 59, 59, 0, time.UTC), end: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC), want: 1},
+		{name: "twenty_seconds_one_minute", start: time.Date(2026, 1, 1, 9, 1, 50, 0, time.UTC), end: time.Date(2026, 1, 1, 9, 2, 10, 0, time.UTC), want: 1},
+		{name: "fifty_nine_seconds_zero", start: time.Date(2026, 1, 1, 9, 1, 0, 0, time.UTC), end: time.Date(2026, 1, 1, 9, 1, 59, 0, time.UTC), want: 0},
+		{name: "ninety_seconds_one_minute", start: time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC), end: time.Date(2026, 1, 1, 9, 1, 30, 0, time.UTC), want: 1},
+		{name: "ninety_seconds_two_minutes", start: time.Date(2026, 1, 1, 9, 0, 45, 0, time.UTC), end: time.Date(2026, 1, 1, 9, 2, 15, 0, time.UTC), want: 2},
+		{name: "longer_diff", start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), end: time.Date(2026, 1, 2, 1, 0, 10, 0, time.UTC), want: (24 * 60) + 60},
+		{name: "tz_diff", start: time.Date(2026, 4, 1, 1, 0, 0, 0, londonTZ(t)), end: time.Date(2026, 4, 1, 2, 0, 0, 0, time.UTC), want: (2 * 60)}, // London is +01:00, 2 hr diff
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EntryMinutes(tc.start, tc.end)
+			if got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

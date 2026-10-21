@@ -203,3 +203,13 @@ func ValidateStartAndEnd(start, end time.Time) error {
 
 	return nil
 }
+
+// EntryMinutes returns the minutes between the truncated start and truncated end times
+// This number agrees with Notion's truncated output
+func EntryMinutes(start, end time.Time) int {
+	truncatedStart := start.UTC().Truncate(time.Minute)
+	truncatedEnd := end.UTC().Truncate(time.Minute)
+
+	diffDuration := truncatedEnd.Sub(truncatedStart)
+	return int(diffDuration.Minutes())
+}

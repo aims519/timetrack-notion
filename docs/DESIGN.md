@@ -72,7 +72,7 @@ Global flags: `--output table|json` (default `table`), `--no-input` (never promp
 
 `HH:MM` always means **today** in the local zone: a time not yet reached is `invalid_time`, so anything earlier (a timer left overnight, an entry across midnight) needs RFC 3339. On DST change days a non-existent or repeated `HH:MM` is also `invalid_time`, with a hint to pass an offset.
 
-**Time zone.** Stored in UTC; JSON is always UTC. Input, table output and the `list` day/week boundaries use the system zone, or `TT_TIMEZONE` (an IANA name; unknown names are `usage`, exit 2). `--week` is the ISO week, Monday to Sunday.
+**Time zone.** Stored in UTC; JSON is always UTC. Input, table output and the `list` day/week boundaries use the system zone, or `TT_TIMEZONE` (an IANA name; unknown names are `usage`, exit 2). Set but empty, `TT_TIMEZONE` is also `usage`: only an unset `TT_TIMEZONE` falls back to the system zone. `--week` is the ISO week, Monday to Sunday.
 
 **Task selector** (`--task` on `start`, `add`, `edit`; the argument of `attach`). The first rule that matches anything decides:
 

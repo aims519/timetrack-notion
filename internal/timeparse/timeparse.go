@@ -1,3 +1,12 @@
+// Package timeparse parses and validates raw time inputs.
+// User input comes from --at, --start, --end, --ago, and --duration command flags.
+// Parsed time results are UTC instants, or durations.
+//
+// [CurrentLocation] resolves the user's Location.
+//
+// [EntryMinutes] calculates the total number of minutes an Entry spans.
+//
+// The package accepts a now time.Time as opposed to reading the system time directly, for testability.
 package timeparse
 
 import (

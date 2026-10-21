@@ -472,3 +472,54 @@ func TestTodayAtHHMM_Error(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateStartAndEnd(t *testing.T) {
+	tests := []struct {
+		name        string
+		start       time.Time
+		end         time.Time
+		fail        bool
+		wantCode    clierr.ErrorCode
+		wantMessage string
+	}{
+		{name: "utc_pass", start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), end: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), fail: false},
+		{name: "utc_end_before_start", start: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), end: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), fail: true, wantCode: clierr.InvalidTime, wantMessage: "start must be before end"},
+		{name: "utc_end_equal_start", start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), end: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), fail: true, wantCode: clierr.InvalidTime, wantMessage: "start cannot equal end"},
+		{name: "utc_one_second_after", start: time.Date(2026, 1, 1, 1, 30, 0, 0, time.UTC), end: time.Date(2026, 1, 1, 1, 30, 1, 0, time.UTC), fail: false},
+		{name: "utc_one_second_before", start: time.Date(2026, 1, 1, 1, 30, 1, 0, time.UTC), end: time.Date(2026, 1, 1, 1, 30, 0, 0, time.UTC), fail: true, wantCode: clierr.InvalidTime, wantMessage: "start must be before end"},
+		{name: "tz_diff_same_instant", start: time.Date(2026, 10, 24, 2, 0, 0, 0, londonTZ(t)), end: time.Date(2026, 10, 24, 1, 0, 0, 0, time.UTC), fail: true, wantCode: clierr.InvalidTime, wantMessage: "start cannot equal end"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateStartAndEnd(tc.start, tc.end)
+
+			// fail case passing
+			if tc.fail && (err == nil) {
+				t.Fatalf("got nil, want an error")
+			}
+
+			// pass case failing
+			if !tc.fail && (err != nil) {
+				t.Fatalf("got %v, want nil", err)
+			}
+
+			// no further checks
+			if !tc.fail {
+				return
+			}
+
+			var cliErr *clierr.Error
+			if !errors.As(err, &cliErr) {
+				t.Fatalf("got %T, want clierr.Error", err)
+			}
+
+			if cliErr.Code != tc.wantCode {
+				t.Errorf("want %v, got %v", tc.wantCode, cliErr.Code)
+			}
+
+			if cliErr.Message != tc.wantMessage {
+				t.Errorf("want %q, got %q", tc.wantMessage, cliErr.Message)
+			}
+		})
+	}
+}

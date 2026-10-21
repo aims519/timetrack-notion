@@ -191,3 +191,15 @@ func todayAtHHMM(input string, now time.Time, loc *time.Location) (time.Time, er
 	requestedTimeStr := fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:00", year, month, day, hours, minutes)
 	return checkWallClockTime(requestedTimeStr, now, loc)
 }
+
+// ValidateStartAndEnd returns an error if end <= start
+func ValidateStartAndEnd(start, end time.Time) error {
+	if start.Equal(end) {
+		return &clierr.Error{Code: clierr.InvalidTime, Message: "start cannot equal end"}
+	}
+	if start.After(end) {
+		return &clierr.Error{Code: clierr.InvalidTime, Message: "start must be before end"}
+	}
+
+	return nil
+}

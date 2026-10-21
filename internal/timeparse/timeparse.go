@@ -62,8 +62,8 @@ func ParseAgo(input string, now time.Time) (time.Time, error) {
 	return now.Add(-1 * d).UTC(), nil
 }
 
-// ParseDuration reads a duration passed in via --ago or --duration
-// Duration should not be negative
+// ParseDuration reads a duration passed in via --ago or --duration.
+// Duration should not be negative, with zeroes allowed
 func ParseDuration(input string) (time.Duration, error) {
 	d, err := time.ParseDuration(input)
 	if err != nil {

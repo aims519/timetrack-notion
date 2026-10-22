@@ -43,6 +43,8 @@ func newRootCmd(f *output.Format, a *app) *cobra.Command {
 		return &clierr.Error{Code: clierr.Usage, Message: err.Error(), Cause: err}
 	})
 
+	rootCmd.AddCommand(newStartCmd(a))
+
 	return rootCmd
 }
 

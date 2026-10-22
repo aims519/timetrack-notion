@@ -18,9 +18,9 @@ type startArgs struct {
 	ago         string
 }
 
-var sa startArgs
-
 func newStartCmd(a *app) *cobra.Command {
+	var sa startArgs
+
 	startCmd := &cobra.Command{
 		Use:     "start [description]",
 		Example: "",
@@ -28,11 +28,17 @@ func newStartCmd(a *app) *cobra.Command {
 		Long:    "",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+
 			if len(args) == 1 {
 				sa.description = args[0]
 			}
 
-			if err := validateFlags(sa, time.Now()); err != nil {
+			loc, err := timeparse.CurrentLocation()
+			if err != nil {
+				return err
+			}
+
+			if err := validateFlags(sa, time.Now(), loc); err != nil {
 				return err
 			}
 
@@ -55,13 +61,17 @@ func newStartCmd(a *app) *cobra.Command {
 
 // validateFlags checks for invalid combinations of flags, required flags that are missing,
 // or flags with malformed values
-func validateFlags(s startArgs, now time.Time) error {
+func validateFlags(s startArgs, now time.Time, loc *time.Location) error {
 	if s.ago != "" && s.at != "" {
 		return &clierr.Error{Code: clierr.Usage, Message: "only one of --ago or --at values are accepted"}
 	}
 
-	if s.task == "" && s.description == "" {
-		return &clierr.Error{Code: clierr.Usage, Message: "at least one of [description] or --task must be provided"}
+	if (s.task == "" && !s.pickTask) && s.description == "" {
+		return &clierr.Error{Code: clierr.Usage, Message: "at least one of [description] or --task/--pick must be provided"}
+	}
+
+	if s.task != "" && s.pickTask {
+		return &clierr.Error{Code: clierr.Usage, Message: "either --task or --pick can be set, not both"}
 	}
 
 	if s.ago != "" {
@@ -71,10 +81,6 @@ func validateFlags(s startArgs, now time.Time) error {
 		}
 	}
 
-	loc, err := timeparse.CurrentLocation()
-	if err != nil {
-		return err
-	}
 	if s.at != "" {
 		_, err := timeparse.Parse(s.at, now, loc)
 		if err != nil {

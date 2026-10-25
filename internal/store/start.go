@@ -14,7 +14,7 @@ import (
 func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, description string) (Entry, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
-		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err}
+		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -22,7 +22,7 @@ func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, descripti
 	runningEntryID := ""
 	err = tx.QueryRowContext(ctx, "SELECT id FROM entries WHERE end_utc IS NULL AND deleted_at IS NULL LIMIT 1").Scan(&runningEntryID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "query failed", Cause: err}
+		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "query failed", Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}
 	if runningEntryID != "" {
 		return Entry{}, &clierr.Error{Code: clierr.TimerRunning, Message: "timer already running", Details: map[string]any{"entry": runningEntryID}}
@@ -45,8 +45,13 @@ func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, descripti
 	if err != nil {
 		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "error writing new entry", Cause: err}
 	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
-		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "error writing new entry"}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "error writing new entry", Cause: err}
+	}
+	if rows != 1 {
+		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "no context found in the database", Details: map[string]any{"path": s.dbPath}}
 	}
 
 	// Return created entry details

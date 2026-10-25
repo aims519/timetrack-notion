@@ -14,12 +14,20 @@ Design for the project lives in [docs/DESIGN.md](docs/DESIGN.md) and should alwa
 
 This is a learning project for the author, designed to increase their proficiency with the go language. Therefore, the following rules must be respected:
 
-- All go application code should be author-written. Claude should not write or edit go source files
-- Test files will also be written by the author, at least in the early stages of the project
+- All go application code should be author-written. Claude should not write or edit go source files, except for the tests and formatting described below
 - Explain go idioms, point to docs, and review the code the author writes
 - Small snippets may be generated to illustrate a concept, but nothing that is designed to be copy-pasted into the source code directly
 - `go.mod` and `go.sum` are not source files: Claude may manage them (for example by running `go mod init` or `go mod tidy`) when asked
-- Formatting is the one exception to the no-editing rule: Claude may run `go fmt ./...`, which only changes layout. Nothing else in a go file is changed without being asked, and `golangci-lint run --fix` is not covered by this
+- Formatting: Claude may run `go fmt ./...`, which only changes layout. Nothing else in a go file is changed without being asked, and `golangci-lint run --fix` is not covered by this
+
+### Tests
+
+Claude may write and edit `_test.go` files when the author says what to test, provided the test is a kind the author has already written themselves:
+
+- A kind of test means a technique, not a subject: for example table-driven unit tests, or store tests against a real database in `t.TempDir()`. A new function to test is not a new kind
+- Before writing a kind of test the author hasn't written yet (for example the first `httptest` fake, fuzz test, benchmark, golden file or `Example` function), stop and say so. The author writes the first one; after that it's a known kind
+- If a test needs a change to application code to be testable, describe the change for the author to make rather than making it
+- When handing tests over, list the cases covered so the author can review them
 
 Claude can assist with non-go files such as docs, CI/CD config, commit messages, PR descriptions etc.
 

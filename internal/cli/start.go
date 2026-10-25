@@ -43,6 +43,11 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			err = rejectUnimplemented(sa)
+			if err != nil {
+				return err
+			}
+
 			startDoc, err := executeUpdates(cmd.Context(), a, sa, startUTC)
 			if err != nil {
 				return err
@@ -85,6 +90,23 @@ func validateFlags(s startArgs, now time.Time, loc *time.Location) (time.Time, e
 	}
 
 	return now, nil
+}
+
+// rejectUnimplemented is a temporary measure until all start flags are implemented
+func rejectUnimplemented(sa startArgs) error {
+	if sa.pickTask {
+		return &clierr.Error{Code: clierr.Usage, Message: "--pick is not supported yet"}
+	}
+
+	if sa.switchTask {
+		return &clierr.Error{Code: clierr.Usage, Message: "--switch is not supported yet"}
+	}
+
+	if sa.task != "" {
+		return &clierr.Error{Code: clierr.Usage, Message: "--task is not supported yet"}
+	}
+
+	return nil
 }
 
 func executeUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time) (output.StartDoc, error) {

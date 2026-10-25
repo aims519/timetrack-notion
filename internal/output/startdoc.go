@@ -1,5 +1,7 @@
 package output
 
+import "io"
+
 // StartDoc is used by the start command
 type StartDoc struct {
 	BaseSchema
@@ -10,4 +12,9 @@ type StartDoc struct {
 
 func NewStartDoc(e Entry, stopped *Entry, w []Warning) StartDoc {
 	return StartDoc{BaseSchema: BaseSchema{SchemaVersion}, Entry: e, Stopped: stopped, Warnings: ensureNotNil(w)}
+}
+
+func (s StartDoc) WriteTable(w io.Writer) error {
+	_, err := w.Write([]byte(s.Entry.ID))
+	return err
 }

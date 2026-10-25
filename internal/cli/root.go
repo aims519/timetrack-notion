@@ -14,7 +14,7 @@ import (
 )
 
 // newRootCmd returns the root cobra command for the application
-func newRootCmd(f *output.Format, a *app) *cobra.Command {
+func newRootCmd(a *app) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "tt",
 		Short:         "Local-first time tracker that syncs time entries to Notion",
@@ -37,7 +37,7 @@ func newRootCmd(f *output.Format, a *app) *cobra.Command {
 		},
 	}
 
-	rootCmd.PersistentFlags().Var(f, "output", "output format: table or json")
+	rootCmd.PersistentFlags().Var(a.format, "output", "output format: table or json")
 
 	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return &clierr.Error{Code: clierr.Usage, Message: err.Error(), Cause: err}
@@ -50,15 +50,16 @@ func newRootCmd(f *output.Format, a *app) *cobra.Command {
 
 // app holds a pointer to the db connection pool so that Run can safely close it
 type app struct {
-	db *store.Store
+	db     *store.Store
+	format *output.Format
 }
 
 // Run builds the root command with args and executes it, writing output to stdout or stderr
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	format := output.Table // default
-	a := app{}
+	a := app{format: &format}
 
-	root := newRootCmd(&format, &a)
+	root := newRootCmd(&a)
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)

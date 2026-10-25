@@ -38,7 +38,7 @@ func TestValidateArgs_Error(t *testing.T) {
 				at:          tc.at,
 				ago:         tc.ago,
 			}
-			err := validateFlags(sa, tc.now, tc.loc)
+			_, err := validateFlags(sa, tc.now, tc.loc)
 			var cliErr *clierr.Error
 			if !errors.As(err, &cliErr) {
 				t.Fatalf("got %v, want clierr.Error", err)
@@ -85,7 +85,7 @@ func TestValidateArgs_Success(t *testing.T) {
 				at:          tc.at,
 				ago:         tc.ago,
 			}
-			err := validateFlags(sa, tc.now, tc.loc)
+			_, err := validateFlags(sa, tc.now, tc.loc)
 
 			if err != nil {
 				t.Fatalf("got %v, want nil", err)

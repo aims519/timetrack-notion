@@ -1,10 +1,11 @@
 package cli
 
 import (
-	"fmt"
+	"context"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
+	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 	"github.com/spf13/cobra"
 )
@@ -28,7 +29,6 @@ func newStartCmd(a *app) *cobra.Command {
 		Long:    "",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-
 			if len(args) == 1 {
 				sa.description = args[0]
 			}
@@ -38,15 +38,17 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			if err := validateFlags(sa, time.Now(), loc); err != nil {
+			startUTC, err := validateFlags(sa, time.Now(), loc)
+			if err != nil {
 				return err
 			}
 
-			fmt.Printf("description: %s\n", sa.description)
-			fmt.Printf("task: %s\n", sa.task)
-			fmt.Printf("switch: %v\n", sa.switchTask)
-			fmt.Printf("pick: %v\n", sa.pickTask)
-			return nil
+			startDoc, err := executeUpdates(cmd.Context(), a, sa, startUTC)
+			if err != nil {
+				return err
+			}
+
+			return output.Write(cmd.OutOrStdout(), *a.format, startDoc)
 		},
 	}
 
@@ -60,33 +62,39 @@ func newStartCmd(a *app) *cobra.Command {
 }
 
 // validateFlags checks for invalid combinations of flags, required flags that are missing,
-// or flags with malformed values
-func validateFlags(s startArgs, now time.Time, loc *time.Location) error {
+// or flags with malformed values. Returns the requested start time of the entry.
+func validateFlags(s startArgs, now time.Time, loc *time.Location) (time.Time, error) {
 	if s.ago != "" && s.at != "" {
-		return &clierr.Error{Code: clierr.Usage, Message: "only one of --ago or --at values are accepted"}
+		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "only one of --ago or --at values are accepted"}
 	}
 
 	if (s.task == "" && !s.pickTask) && s.description == "" {
-		return &clierr.Error{Code: clierr.Usage, Message: "at least one of [description] or --task/--pick must be provided"}
+		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "at least one of [description] or --task/--pick must be provided"}
 	}
 
 	if s.task != "" && s.pickTask {
-		return &clierr.Error{Code: clierr.Usage, Message: "either --task or --pick can be set, not both"}
+		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "either --task or --pick can be set, not both"}
 	}
 
 	if s.ago != "" {
-		_, err := timeparse.ParseAgo(s.ago, now)
-		if err != nil {
-			return err
-		}
+		return timeparse.ParseAgo(s.ago, now)
 	}
 
 	if s.at != "" {
-		_, err := timeparse.Parse(s.at, now, loc)
-		if err != nil {
-			return err
-		}
+		return timeparse.Parse(s.at, now, loc)
 	}
 
-	return nil
+	return now, nil
+}
+
+func executeUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time) (output.StartDoc, error) {
+	//TODO switch timer
+
+	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, s.description)
+	if err != nil {
+		return output.StartDoc{}, err
+	}
+
+	return output.NewStartDoc(mapDBEntry(dbEntry),
+		nil, nil), nil
 }

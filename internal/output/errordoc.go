@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
@@ -17,7 +18,7 @@ func NewErrorDoc(e clierr.Error) ErrorDoc {
 }
 
 // Write tabular output
-func (d ErrorDoc) WriteTable(w io.Writer) error {
+func (d ErrorDoc) WriteTable(w io.Writer, _ *time.Location) error {
 	_, err := fmt.Fprintln(w, d.Error.Message)
 	return err
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"io"
+	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/output"
@@ -27,11 +28,13 @@ func printError(w io.Writer, f output.Format, err error) {
 	}
 
 	errorDoc := output.NewErrorDoc(*cliError)
-	writeErr := output.Write(w, f, errorDoc)
+
+	// Error doc never shows local times, so pass in default UTC location
+	writeErr := output.Write(w, f, errorDoc, time.UTC)
 
 	// If writing fails, remove Details from errorDoc and try again
 	if writeErr != nil {
 		errorDoc.Error.Details = nil
-		_ = output.Write(w, f, errorDoc)
+		_ = output.Write(w, f, errorDoc, time.UTC)
 	}
 }

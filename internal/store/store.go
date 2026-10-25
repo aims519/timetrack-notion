@@ -15,6 +15,7 @@ const openMaxConnections = 1
 
 type Store struct {
 	connectionPool *sql.DB
+	dbPath         string
 }
 
 func Open(ctx context.Context, dbPath string) (*Store, error) {
@@ -46,7 +47,7 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{connectionPool: connPool}, nil
+	return &Store{connectionPool: connPool, dbPath: dbPath}, nil
 }
 
 func (s *Store) Close() error {

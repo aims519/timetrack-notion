@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
@@ -78,7 +79,7 @@ func TestErrorDoc_WriteTable_WritesExpectedOutput(t *testing.T) {
 	doc := ErrorDoc{Error: clierr.Error{Message: "expected message"}}
 	w := &bytes.Buffer{}
 
-	err := doc.WriteTable(w)
+	err := doc.WriteTable(w, time.UTC)
 	if err != nil {
 		t.Fatalf("WriteTable() error = %v", err)
 	}

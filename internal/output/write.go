@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 )
 
 // Write writes doc to w in format f
-func Write(w io.Writer, f Format, doc Doc) error {
+func Write(w io.Writer, f Format, doc Doc, loc *time.Location) error {
 	switch f {
 	case Table:
-		return doc.WriteTable(w)
+		return doc.WriteTable(w, loc)
 	case JSON:
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)

@@ -48,7 +48,7 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			return output.Write(cmd.OutOrStdout(), *a.format, startDoc)
+			return output.Write(cmd.OutOrStdout(), *a.format, startDoc, loc)
 		},
 	}
 

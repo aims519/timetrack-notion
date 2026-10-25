@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 )
 
 type fakeDoc struct {
@@ -13,7 +14,7 @@ type fakeDoc struct {
 	Message string `json:"message"`
 }
 
-func (f fakeDoc) WriteTable(w io.Writer) error {
+func (f fakeDoc) WriteTable(w io.Writer, _ *time.Location) error {
 	_, err := fmt.Fprintln(w, "fake table output")
 	return err
 }
@@ -22,7 +23,7 @@ type unwritableDoc struct{}
 
 var errUnwritableDoc error = errors.New("unable to write table output")
 
-func (u unwritableDoc) WriteTable(w io.Writer) error {
+func (u unwritableDoc) WriteTable(w io.Writer, _ *time.Location) error {
 	return errUnwritableDoc
 }
 
@@ -38,7 +39,7 @@ func TestWrite_JSONFormat_WritesExpectedOutput(t *testing.T) {
 	doc := fakeDoc{Value: 21, Message: "twenty one"}
 	w := &bytes.Buffer{}
 
-	err := Write(w, JSON, doc)
+	err := Write(w, JSON, doc, time.UTC)
 	if err != nil {
 		t.Fatalf("error writing fakeDoc %v", err)
 	}
@@ -55,7 +56,7 @@ func TestWrite_TableFormat_WritesExpectedOutput(t *testing.T) {
 	doc := fakeDoc{}
 	w := &bytes.Buffer{}
 
-	err := Write(w, Table, doc)
+	err := Write(w, Table, doc, time.UTC)
 	if err != nil {
 		t.Fatalf("error writing fakeDoc %v", err)
 	}
@@ -72,7 +73,7 @@ func TestWrite_JSONFormatWithSpecialCharacters_WritesUnescapedOutput(t *testing.
 	doc := fakeDoc{Value: 5, Message: "R&D <x>"}
 	w := &bytes.Buffer{}
 
-	err := Write(w, JSON, doc)
+	err := Write(w, JSON, doc, time.UTC)
 	if err != nil {
 		t.Fatalf("error writing fakeDoc %v", err)
 	}
@@ -90,7 +91,7 @@ func TestWrite_UnknownFormat_ReturnsError(t *testing.T) {
 	w := &bytes.Buffer{}
 
 	f := Format("xml")
-	err := Write(w, f, doc)
+	err := Write(w, f, doc, time.UTC)
 	if err == nil {
 		t.Fatalf("unknown format did not throw an error %q", f)
 	}
@@ -104,7 +105,7 @@ func TestWrite_ErrorDuringDocTableWrite_ReturnsError(t *testing.T) {
 	doc := unwritableDoc{}
 	w := &bytes.Buffer{}
 
-	err := Write(w, Table, doc)
+	err := Write(w, Table, doc, time.UTC)
 	if err == nil {
 		t.Fatal("error writing unwritable doc not returned")
 	}
@@ -118,7 +119,7 @@ func TestWrite_WriterErrorTableFormat_ReturnsError(t *testing.T) {
 	doc := fakeDoc{}
 	w := failingWriter{}
 
-	err := Write(w, Table, doc)
+	err := Write(w, Table, doc, time.UTC)
 	if err == nil {
 		t.Fatal("writer failure not returned")
 	}
@@ -132,7 +133,7 @@ func TestWrite_WriterErrorJSONFormat_ReturnsError(t *testing.T) {
 	doc := fakeDoc{}
 	w := failingWriter{}
 
-	err := Write(w, JSON, doc)
+	err := Write(w, JSON, doc, time.UTC)
 	if err == nil {
 		t.Fatal("writer failure not returned")
 	}

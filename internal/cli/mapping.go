@@ -8,6 +8,17 @@ import (
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 )
 
+// mapNullableDBEntry is a wrapper to handle cases where a result from
+// the DB may be nil
+func mapNullableDBEntry(e *store.Entry) *output.Entry {
+	if e == nil {
+		return nil
+	}
+
+	result := mapDBEntry(*e)
+	return &result
+}
+
 // mapDBEntry maps the properties of an Entry returned from
 // the store into an output.Entry
 func mapDBEntry(e store.Entry) output.Entry {

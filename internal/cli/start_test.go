@@ -106,7 +106,6 @@ func TestRun_Start_UnimplementedFlags(t *testing.T) {
 		args     []string
 		wantFlag string // the flag the error message should name
 	}{
-		{"switch_with_description", []string{"start", "--switch", "organising calendar"}, "--switch"},
 		{"task_only", []string{"start", "--task", "1.1"}, "--task"},
 		{"task_with_description", []string{"start", "--task", "1.1", "organising calendar"}, "--task"},
 		{"pick_only", []string{"start", "--pick"}, "--pick"},
@@ -153,5 +152,138 @@ func TestRun_Start_UnimplementedFlags(t *testing.T) {
 				t.Errorf("Run(%v) after rejection = %d, want 0 (stderr: %q)", plain, got, stderr.String())
 			}
 		})
+	}
+}
+
+// startOutput is the part of the start command's JSON output the switch tests check
+type startOutput struct {
+	Entry struct {
+		ID    string  `json:"id"`
+		Start string  `json:"start"`
+		End   *string `json:"end"`
+	} `json:"entry"`
+	Stopped *struct {
+		ID  string  `json:"id"`
+		End *string `json:"end"`
+	} `json:"stopped"`
+}
+
+// runStart runs tt with args and JSON output, returning the exit code, stdout and stderr
+func runStart(t *testing.T, args ...string) (int, []byte, []byte) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	got := Run(context.Background(), append(args, "--output", "json"), &stdout, &stderr)
+	return got, stdout.Bytes(), stderr.Bytes()
+}
+
+func TestRun_Start_Switch(t *testing.T) {
+	const firstStart = "2026-01-01T09:00:00Z"
+	const switchAt = "2026-01-01T10:00:00Z"
+
+	tests := []struct {
+		name        string
+		running     bool // start a timer at firstStart before switching
+		wantStopped bool
+	}{
+		{name: "nothing_running", wantStopped: false},
+		{name: "timer_running", running: true, wantStopped: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TT_DB", filepath.Join(t.TempDir(), "test.db"))
+			t.Setenv("TT_TIMEZONE", "UTC")
+
+			var first startOutput
+			if tc.running {
+				code, stdout, stderr := runStart(t, "start", "organising calendar", "--at", firstStart)
+				if code != 0 {
+					t.Fatalf("first start = %d, want 0 (stderr: %q)", code, stderr)
+				}
+				if err := json.Unmarshal(stdout, &first); err != nil {
+					t.Fatalf("unable to decode first start output %q: %v", stdout, err)
+				}
+			}
+
+			code, stdout, stderr := runStart(t, "start", "--switch", "writing tests", "--at", switchAt)
+			if code != 0 {
+				t.Fatalf("start --switch = %d, want 0 (stderr: %q)", code, stderr)
+			}
+
+			var got startOutput
+			if err := json.Unmarshal(stdout, &got); err != nil {
+				t.Fatalf("unable to decode start --switch output %q: %v", stdout, err)
+			}
+
+			if got.Entry.ID == "" || got.Entry.ID == first.Entry.ID {
+				t.Errorf("entry.id want a new entry ID, got %q", got.Entry.ID)
+			}
+			if got.Entry.Start != switchAt {
+				t.Errorf("entry.start want %q, got %q", switchAt, got.Entry.Start)
+			}
+			if got.Entry.End != nil {
+				t.Errorf("entry.end want null, got %q", *got.Entry.End)
+			}
+
+			if !tc.wantStopped {
+				if got.Stopped != nil {
+					t.Errorf("stopped want null, got %+v", *got.Stopped)
+				}
+				return
+			}
+			if got.Stopped == nil {
+				t.Fatalf("stopped want entry %q, got null", first.Entry.ID)
+			}
+			if got.Stopped.ID != first.Entry.ID {
+				t.Errorf("stopped.id want %q, got %q", first.Entry.ID, got.Stopped.ID)
+			}
+			// The old entry ends at the instant the new one starts
+			if got.Stopped.End == nil || *got.Stopped.End != got.Entry.Start {
+				t.Errorf("stopped.end want %q, got %v", got.Entry.Start, got.Stopped.End)
+			}
+		})
+	}
+}
+
+func TestRun_Start_SwitchBeforeRunningStart(t *testing.T) {
+	t.Setenv("TT_DB", filepath.Join(t.TempDir(), "test.db"))
+	t.Setenv("TT_TIMEZONE", "UTC")
+
+	if code, _, stderr := runStart(t, "start", "organising calendar", "--at", "2026-01-01T09:00:00Z"); code != 0 {
+		t.Fatalf("first start = %d, want 0 (stderr: %q)", code, stderr)
+	}
+
+	code, stdout, stderr := runStart(t, "start", "--switch", "writing tests", "--at", "2026-01-01T08:00:00Z")
+	if code != 2 {
+		t.Errorf("start --switch before the running start = %d, want 2 (stderr: %q)", code, stderr)
+	}
+
+	// A failed command must write nothing to stdout
+	if len(stdout) != 0 {
+		t.Errorf("start --switch wrote to stdout on failure: %q", stdout)
+	}
+
+	var doc struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stderr, &doc); err != nil {
+		t.Fatalf("unable to decode error document %q: %v", stderr, err)
+	}
+	if doc.Error.Code != string(clierr.InvalidTime) {
+		t.Errorf("error code want %q, got %q", clierr.InvalidTime, doc.Error.Code)
+	}
+
+	// The first timer is still running, so a plain start is refused
+	code, _, stderr = runStart(t, "start", "organising calendar")
+	if code != 4 {
+		t.Errorf("start after the failed switch = %d, want 4 (stderr: %q)", code, stderr)
+	}
+	if err := json.Unmarshal(stderr, &doc); err != nil {
+		t.Fatalf("unable to decode error document %q: %v", stderr, err)
+	}
+	if doc.Error.Code != string(clierr.TimerRunning) {
+		t.Errorf("error code want %q, got %q", clierr.TimerRunning, doc.Error.Code)
 	}
 }

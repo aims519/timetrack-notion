@@ -98,10 +98,6 @@ func rejectUnimplemented(sa startArgs) error {
 		return &clierr.Error{Code: clierr.Usage, Message: "--pick is not supported yet"}
 	}
 
-	if sa.switchTask {
-		return &clierr.Error{Code: clierr.Usage, Message: "--switch is not supported yet"}
-	}
-
 	if sa.task != "" {
 		return &clierr.Error{Code: clierr.Usage, Message: "--task is not supported yet"}
 	}
@@ -110,7 +106,15 @@ func rejectUnimplemented(sa startArgs) error {
 }
 
 func executeUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time) (output.StartDoc, error) {
-	//TODO switch timer
+	if s.switchTask {
+		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, s.description)
+		if err != nil {
+			return output.StartDoc{}, err
+		}
+
+		return output.NewStartDoc(mapDBEntry(startedEntry),
+			mapNullableDBEntry(stoppedEntry), nil), nil
+	}
 
 	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, s.description)
 	if err != nil {

@@ -2,6 +2,7 @@ package output
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 )
@@ -106,6 +107,62 @@ func TestStartDoc_WriteTable_WritesExpectedOutput(t *testing.T) {
 			}
 
 			if got, want := w.String(), tc.want+"\n"; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestStartDoc_WriteTable_StoppedEntry(t *testing.T) {
+	const startedID = "0605115f-a394-4b6d-a8f7-528408bbc44f"
+	const stoppedID = "11111111-1111-1111-1111-111111111111"
+	started := "writing tests"
+	stopped := "organising calendar"
+
+	// A switch stops the old entry at the instant the new one starts
+	switchAt := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	newStopped := func(description *string) *Entry {
+		end := NewUTCTime(switchAt)
+		return &Entry{ID: stoppedID, Start: NewUTCTime(time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)), End: &end, Description: description, SyncState: "pending"}
+	}
+
+	// want holds the lines without their trailing newlines, so they can be raw strings
+	tests := []struct {
+		name    string
+		stopped *Entry
+		loc     *time.Location
+		want    []string
+	}{
+		{"no_stopped_entry", nil, time.UTC, []string{
+			`Started tracking "writing tests" at 10:00 (0605115)`,
+		}},
+		{"stopped_entry", newStopped(&stopped), time.UTC, []string{
+			`Stopped tracking "organising calendar" at 10:00 (1111111)`,
+			`Started tracking "writing tests" at 10:00 (0605115)`,
+		}},
+		{"stopped_entry_no_description", newStopped(nil), time.UTC, []string{
+			`Stopped tracking "(no description)" at 10:00 (1111111)`,
+			`Started tracking "writing tests" at 10:00 (0605115)`,
+		}},
+		{"stopped_entry_local_zone", newStopped(&stopped), time.FixedZone("minus4", -4*60*60), []string{
+			`Stopped tracking "organising calendar" at 06:00 (1111111)`,
+			`Started tracking "writing tests" at 06:00 (0605115)`,
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := Entry{ID: startedID, Start: NewUTCTime(switchAt), Description: &started, SyncState: "pending"}
+			doc := NewStartDoc(e, tc.stopped, nil)
+			w := &bytes.Buffer{}
+
+			err := doc.WriteTable(w, tc.loc)
+			if err != nil {
+				t.Fatalf("WriteTable() error = %v", err)
+			}
+
+			if got, want := w.String(), strings.Join(tc.want, "\n")+"\n"; got != want {
 				t.Errorf("got %q, want %q", got, want)
 			}
 		})

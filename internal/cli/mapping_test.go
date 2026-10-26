@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -145,6 +146,41 @@ func TestMapDBEntry_StoppedEntry(t *testing.T) {
 				t.Errorf("Minutes want %d, got nil", tc.wantMinutes)
 			} else if *got.Minutes != tc.wantMinutes {
 				t.Errorf("Minutes want %d, got %d", tc.wantMinutes, *got.Minutes)
+			}
+		})
+	}
+}
+
+func TestMapNullableDBEntry(t *testing.T) {
+	description := "writing tests"
+	start := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		entry *store.Entry
+	}{
+		{"nil", nil},
+		{"running", &store.Entry{ID: "0605115f-a394-4b6d-a8f7-528408bbc44f", Description: &description, StartUTC: start, SyncState: "pending", UpdatedAt: start}},
+		{"stopped", &store.Entry{ID: "0605115f-a394-4b6d-a8f7-528408bbc44f", Description: &description, StartUTC: start, EndUTC: &end, SyncState: "pending", UpdatedAt: end}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mapNullableDBEntry(tc.entry)
+
+			if tc.entry == nil {
+				if got != nil {
+					t.Errorf("want nil, got %+v", *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("want an entry, got nil")
+			}
+			// A non-nil entry maps exactly as mapDBEntry maps it
+			if want := mapDBEntry(*tc.entry); !reflect.DeepEqual(*got, want) {
+				t.Errorf("want %+v, got %+v", want, *got)
 			}
 		})
 	}

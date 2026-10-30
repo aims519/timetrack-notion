@@ -11,3 +11,11 @@ const SchemaVersion = 1
 type BaseWarnings struct {
 	Warnings []Warning `json:"warnings"`
 }
+
+type warningLister interface {
+	listWarnings() []Warning
+}
+
+func (w BaseWarnings) listWarnings() []Warning {
+	return w.Warnings
+}

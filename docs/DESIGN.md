@@ -52,7 +52,7 @@ Status: design draft, v1 scope. Binary name `tt` is a placeholder. Deferred feat
 | **Task** | A page in the Notion tasks database, identified by its page ID. Names and order numbers are display hints and not unique. |
 | **Project** | A page in the Notion projects database. Tasks relate to it; it scopes task selection. |
 | **Context** | The Notion configuration (databases, property mapping, default project), stored with the entries. v1 has exactly one. It is **local-only** until `init` **connects** it. |
-| **Sync state** | Per entry: `pending`, `synced`, `failed` (temporary Notion error, retried next run, counted as pending by `status`) or `blocked` (permanent problem, needs fixing). A stopped entry with no task is **waiting**; this is derived, not stored. |
+| **Sync state** | Per entry: `pending` (everything a sync needs is present, but it hasn't been synced yet), `synced`, `failed` (temporary Notion error, retried next run, counted as pending by `status`) or `blocked` (a sync was attempted and failed permanently; needs fixing). An entry that needs more before a sync can be attempted, because it is running or has no task, is **waiting**; this is derived, not stored, so such an entry is stored as `pending` but counted as waiting. A tombstoned entry is pending until its row is archived. |
 
 Only **one timer runs at a time**.
 

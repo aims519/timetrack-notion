@@ -30,11 +30,11 @@ func printError(w io.Writer, f output.Format, err error) {
 	errorDoc := output.NewErrorDoc(*cliError)
 
 	// Error doc never shows local times, so pass in default UTC location
-	writeErr := output.Write(w, f, errorDoc, time.UTC)
+	writeErr := output.Write(w, w, f, errorDoc, time.UTC)
 
 	// If writing fails, remove Details from errorDoc and try again
 	if writeErr != nil {
 		errorDoc.Error.Details = nil
-		_ = output.Write(w, f, errorDoc, time.UTC)
+		_ = output.Write(w, w, f, errorDoc, time.UTC)
 	}
 }

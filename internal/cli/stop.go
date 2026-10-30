@@ -38,7 +38,7 @@ func newStopCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			return output.Write(cmd.OutOrStdout(), *a.format, entryDoc, loc)
+			return output.Write(cmd.OutOrStdout(), cmd.ErrOrStderr(), *a.format, entryDoc, loc)
 		},
 	}
 

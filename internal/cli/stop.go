@@ -66,11 +66,11 @@ func validateStopFlags(s stopArgs, now time.Time, loc *time.Location) (time.Time
 	return now, nil
 }
 
-func executeStopUpdates(ctx context.Context, a *app, stopUTC time.Time) (output.EntryDoc, error) {
+func executeStopUpdates(ctx context.Context, a *app, stopUTC time.Time) (output.StopDoc, error) {
 	dbEntry, err := a.db.StopTimer(ctx, stopUTC)
 	if err != nil {
-		return output.EntryDoc{}, err
+		return output.StopDoc{}, err
 	}
 
-	return output.NewEntryDoc(mapDBEntry(dbEntry), nil), nil
+	return output.NewStopDoc(mapDBEntry(dbEntry), nil), nil
 }

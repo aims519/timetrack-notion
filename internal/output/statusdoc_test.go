@@ -1,8 +1,11 @@
 package output
 
 import (
+	"bytes"
 	"maps"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestStatusDoc_Marshal_NothingRunning_RunningAndElapsedNull(t *testing.T) {
@@ -91,5 +94,91 @@ func TestStatusDoc_Marshal_TodayAndCounts_NestedObjectsWithExactKeys(t *testing.
 				t.Errorf("Got %s = %v, want %v", tc.key, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStatusDoc_WriteTable_WritesExpectedOutput(t *testing.T) {
+	const fullID = "0605115f-a394-4b6d-a8f7-528408bbc44f"
+	description := "writing tests"
+
+	newRunning := func(description *string) *Entry {
+		return &Entry{ID: fullID, Start: NewUTCTime(time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)), Description: description, SyncState: "pending"}
+	}
+
+	// want holds the lines without their trailing newlines, so they can be raw strings.
+	// The first column is as wide as its longest label plus 3 spaces of padding
+	tests := []struct {
+		name      string
+		running   *Entry
+		elapsed   int
+		today     TodayCounts
+		counts    CountsSummary
+		connected bool
+		want      []string
+	}{
+		{"nothing_running", nil, 0, TodayCounts{}, CountsSummary{}, true, []string{
+			`Today   0 entries, 0m`,
+			`Sync    0 pending · 0 blocked · 0 waiting`,
+		}},
+		{"nothing_running_with_entries_today", nil, 0, TodayCounts{Entries: 3, Minutes: 135}, CountsSummary{Pending: 1, Blocked: 2, Waiting: 3}, true, []string{
+			`Today   3 entries, 2h 15m`,
+			`Sync    1 pending · 2 blocked · 3 waiting`,
+		}},
+		{"running", newRunning(&description), 4805, TodayCounts{Entries: 1, Minutes: 80}, CountsSummary{Waiting: 1}, true, []string{
+			`Tracking   "writing tests" (0605115), 1h 20m`,
+			`Today      1 entry, 1h 20m`,
+			`Sync       0 pending · 0 blocked · 1 waiting`,
+		}},
+		// Elapsed seconds are shown as whole minutes
+		{"running_under_a_minute", newRunning(&description), 59, TodayCounts{Entries: 1}, CountsSummary{Waiting: 1}, true, []string{
+			`Tracking   "writing tests" (0605115), 0m`,
+			`Today      1 entry, 0m`,
+			`Sync       0 pending · 0 blocked · 1 waiting`,
+		}},
+		{"running_no_description", newRunning(nil), 600, TodayCounts{Entries: 1, Minutes: 10}, CountsSummary{Waiting: 1}, true, []string{
+			`Tracking   "(no description)" (0605115), 10m`,
+			`Today      1 entry, 10m`,
+			`Sync       0 pending · 0 blocked · 1 waiting`,
+		}},
+		// The hint has no tab, so it doesn't widen the first column
+		{"not_connected", nil, 0, TodayCounts{}, CountsSummary{}, false, []string{
+			`Today   0 entries, 0m`,
+			`Sync    0 pending · 0 blocked · 0 waiting`,
+			``,
+			`Not connected to Notion: run 'tt init' to sync`,
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := NewStatusDoc(tc.running, tc.elapsed, tc.today, tc.counts, tc.connected, nil)
+			w := &bytes.Buffer{}
+
+			err := doc.WriteTable(w, time.UTC)
+			if err != nil {
+				t.Fatalf("WriteTable() error = %v", err)
+			}
+
+			if got, want := w.String(), strings.Join(tc.want, "\n")+"\n"; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestStatusDoc_WriteTable_WarningsNotInTable(t *testing.T) {
+	running := newTestEntry()
+	warnings := []Warning{{Code: StaleTimer, Message: "timer has been running for over 12 hours"}}
+	doc := NewStatusDoc(&running, 13*60*60, TodayCounts{}, CountsSummary{}, true, warnings)
+	w := &bytes.Buffer{}
+
+	err := doc.WriteTable(w, time.UTC)
+	if err != nil {
+		t.Fatalf("WriteTable() error = %v", err)
+	}
+
+	// Write prints warnings to stderr, so the table must not repeat them (DESIGN.md §8)
+	if strings.Contains(w.String(), "12 hours") {
+		t.Errorf("table output want no warning, got %q", w.String())
 	}
 }

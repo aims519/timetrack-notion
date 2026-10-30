@@ -44,6 +44,7 @@ func newRootCmd(a *app) *cobra.Command {
 	})
 
 	rootCmd.AddCommand(newStartCmd(a))
+	rootCmd.AddCommand(newStopCmd(a))
 
 	return rootCmd
 }

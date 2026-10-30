@@ -38,7 +38,7 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			startUTC, err := validateFlags(sa, time.Now(), loc)
+			startUTC, err := validateStartFlags(sa, time.Now(), loc)
 			if err != nil {
 				return err
 			}
@@ -66,9 +66,9 @@ func newStartCmd(a *app) *cobra.Command {
 	return startCmd
 }
 
-// validateFlags checks for invalid combinations of flags, required flags that are missing,
+// validateStartFlags checks for invalid combinations of flags, required flags that are missing,
 // or flags with malformed values. Returns the requested start time of the entry.
-func validateFlags(s startArgs, now time.Time, loc *time.Location) (time.Time, error) {
+func validateStartFlags(s startArgs, now time.Time, loc *time.Location) (time.Time, error) {
 	if s.ago != "" && s.at != "" {
 		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "only one of --ago or --at values are accepted"}
 	}

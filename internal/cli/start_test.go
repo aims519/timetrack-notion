@@ -14,7 +14,7 @@ import (
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
 
-func TestValidateArgs_Error(t *testing.T) {
+func TestValidateStartFlags_Error(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -44,7 +44,7 @@ func TestValidateArgs_Error(t *testing.T) {
 				at:          tc.at,
 				ago:         tc.ago,
 			}
-			_, err := validateFlags(sa, tc.now, tc.loc)
+			_, err := validateStartFlags(sa, tc.now, tc.loc)
 			var cliErr *clierr.Error
 			if !errors.As(err, &cliErr) {
 				t.Fatalf("got %v, want clierr.Error", err)
@@ -57,7 +57,7 @@ func TestValidateArgs_Error(t *testing.T) {
 	}
 }
 
-func TestValidateArgs_Success(t *testing.T) {
+func TestValidateStartFlags_Success(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -91,7 +91,7 @@ func TestValidateArgs_Success(t *testing.T) {
 				at:          tc.at,
 				ago:         tc.ago,
 			}
-			_, err := validateFlags(sa, tc.now, tc.loc)
+			_, err := validateStartFlags(sa, tc.now, tc.loc)
 
 			if err != nil {
 				t.Fatalf("got %v, want nil", err)

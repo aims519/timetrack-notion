@@ -4,12 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/google/uuid"
 )
+
+const defaultContextID = "00000000-0000-0000-0000-000000000000"
 
 func tryStopRunningEntry(ctx context.Context, tx *sql.Tx, endUTC, nowUTC time.Time, dbPath string) (uuid.UUID, error) {
 	runningEntryID, runningEntryStart, found, err := findRunningEntry(ctx, tx, dbPath)
@@ -47,12 +48,12 @@ func tryStopRunningEntry(ctx context.Context, tx *sql.Tx, endUTC, nowUTC time.Ti
 	return runningEntryID, nil
 }
 
+type scanner interface {
+	Scan(dest ...any) error
+}
+
 func scanEntryRow(ctx context.Context, tx *sql.Tx, id uuid.UUID) (Entry, error) {
-	var entry Entry
-	var startUTCStr string
-	var endUTCStr *string
-	var updatedAtUTCStr string
-	err := tx.QueryRowContext(ctx, `
+	row := tx.QueryRowContext(ctx, `
 	SELECT id,
 	description,
 	start_utc,
@@ -62,7 +63,17 @@ func scanEntryRow(ctx context.Context, tx *sql.Tx, id uuid.UUID) (Entry, error) 
 	sync_state,
 	updated_at
 	FROM entries 
-	WHERE id = ?`, id).Scan(&entry.ID,
+	WHERE id = ?`, id)
+
+	return scanEntry(row)
+}
+
+func scanEntry(s scanner) (Entry, error) {
+	var entry Entry
+	var startUTCStr string
+	var endUTCStr *string
+	var updatedAtUTCStr string
+	err := s.Scan(&entry.ID,
 		&entry.Description,
 		&startUTCStr,
 		&endUTCStr,
@@ -72,7 +83,7 @@ func scanEntryRow(ctx context.Context, tx *sql.Tx, id uuid.UUID) (Entry, error) 
 		&updatedAtUTCStr,
 	)
 	if err != nil {
-		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: fmt.Sprintf("error reading newly created row from entries: %v", err), Cause: err}
+		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "unable to scan row from entries", Cause: err}
 	}
 
 	entry.StartUTC, err = FromDBString(startUTCStr)

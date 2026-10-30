@@ -168,8 +168,8 @@ type startOutput struct {
 	} `json:"stopped"`
 }
 
-// runStart runs tt with args and JSON output, returning the exit code, stdout and stderr
-func runStart(t *testing.T, args ...string) (int, []byte, []byte) {
+// runTT runs tt with args and JSON output, returning the exit code, stdout and stderr
+func runTT(t *testing.T, args ...string) (int, []byte, []byte) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	got := Run(context.Background(), append(args, "--output", "json"), &stdout, &stderr)
@@ -196,7 +196,7 @@ func TestRun_Start_Switch(t *testing.T) {
 
 			var first startOutput
 			if tc.running {
-				code, stdout, stderr := runStart(t, "start", "organising calendar", "--at", firstStart)
+				code, stdout, stderr := runTT(t, "start", "organising calendar", "--at", firstStart)
 				if code != 0 {
 					t.Fatalf("first start = %d, want 0 (stderr: %q)", code, stderr)
 				}
@@ -205,7 +205,7 @@ func TestRun_Start_Switch(t *testing.T) {
 				}
 			}
 
-			code, stdout, stderr := runStart(t, "start", "--switch", "writing tests", "--at", switchAt)
+			code, stdout, stderr := runTT(t, "start", "--switch", "writing tests", "--at", switchAt)
 			if code != 0 {
 				t.Fatalf("start --switch = %d, want 0 (stderr: %q)", code, stderr)
 			}
@@ -249,11 +249,11 @@ func TestRun_Start_SwitchBeforeRunningStart(t *testing.T) {
 	t.Setenv("TT_DB", filepath.Join(t.TempDir(), "test.db"))
 	t.Setenv("TT_TIMEZONE", "UTC")
 
-	if code, _, stderr := runStart(t, "start", "organising calendar", "--at", "2026-01-01T09:00:00Z"); code != 0 {
+	if code, _, stderr := runTT(t, "start", "organising calendar", "--at", "2026-01-01T09:00:00Z"); code != 0 {
 		t.Fatalf("first start = %d, want 0 (stderr: %q)", code, stderr)
 	}
 
-	code, stdout, stderr := runStart(t, "start", "--switch", "writing tests", "--at", "2026-01-01T08:00:00Z")
+	code, stdout, stderr := runTT(t, "start", "--switch", "writing tests", "--at", "2026-01-01T08:00:00Z")
 	if code != 2 {
 		t.Errorf("start --switch before the running start = %d, want 2 (stderr: %q)", code, stderr)
 	}
@@ -276,7 +276,7 @@ func TestRun_Start_SwitchBeforeRunningStart(t *testing.T) {
 	}
 
 	// The first timer is still running, so a plain start is refused
-	code, _, stderr = runStart(t, "start", "organising calendar")
+	code, _, stderr = runTT(t, "start", "organising calendar")
 	if code != 4 {
 		t.Errorf("start after the failed switch = %d, want 4 (stderr: %q)", code, stderr)
 	}

@@ -7,7 +7,7 @@ import (
 type queryResult struct {
 	PageType      string            `json:"type"`
 	NextCursor    string            `json:"next_cursor"`
-	HasMore       bool              `json:"Has_more"`
+	HasMore       bool              `json:"has_more"`
 	Results       []page            `json:"results"`
 	RequestStatus queryResultStatus `json:"request_status"`
 }

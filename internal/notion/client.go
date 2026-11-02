@@ -40,14 +40,14 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]pa
 	moreResultsAvailable := true
 
 	for moreResultsAvailable {
-		pages, startCursor, hasMore, err := dataSourcePageRequest(ctx, url, nextCursor, c.apiVersion, c.apiToken, c.httpClient)
+		pages, cursor, hasMore, err := dataSourcePageRequest(ctx, url, nextCursor, c.apiVersion, c.apiToken, c.httpClient)
 		if err != nil {
-			return []page{}, err
+			return nil, err
 		}
 
 		pageResults = append(pageResults, pages...)
 		moreResultsAvailable = hasMore
-		nextCursor = startCursor
+		nextCursor = cursor
 	}
 
 	return pageResults, nil
@@ -63,10 +63,6 @@ func handleErrorResponse(res *http.Response, b []byte) error {
 	if res.StatusCode == http.StatusOK {
 		return nil
 	}
-
-	// include Notion's error details if response body is from Notion
-	var notionError *errorResponse
-	_ = json.Unmarshal(b, &notionError)
 
 	var e errorResponse
 	var messageDetailSuffix string

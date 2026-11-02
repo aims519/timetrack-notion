@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
@@ -33,14 +34,14 @@ func NewClient(baseURL, apiToken string, httpClient *http.Client) *Client {
 	}
 }
 
-func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]page, error) {
+func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string, since *time.Time) ([]Page, error) {
 	url := fmt.Sprintf("%s/data_sources/%s/query", c.baseURL, dataSourceID)
-	var pageResults []page
+	var pageResults []Page
 	var nextCursor string
 	moreResultsAvailable := true
 
 	for moreResultsAvailable {
-		pages, cursor, hasMore, err := dataSourcePageRequest(ctx, url, nextCursor, c.apiVersion, c.apiToken, c.httpClient)
+		pages, cursor, hasMore, err := dataSourcePageRequest(ctx, url, nextCursor, c.apiVersion, c.apiToken, c.httpClient, since)
 		if err != nil {
 			return nil, err
 		}
@@ -86,44 +87,59 @@ func handleErrorResponse(res *http.Response, b []byte) error {
 	return &clierr.Error{Code: clierr.Internal, Message: "unknown Notion error"}
 }
 
-func dataSourcePageRequest(ctx context.Context, url, startCursor, apiVersion, apiToken string, client *http.Client) (pages []page, nextCursor string, hasMore bool, err error) {
-	type request struct {
-		StartCursor string `json:"start_cursor,omitempty"`
-		PageSize    int    `json:"page_size"`
+func dataSourcePageRequest(ctx context.Context, url, startCursor, apiVersion, apiToken string, client *http.Client, since *time.Time) (pages []Page, nextCursor string, hasMore bool, err error) {
+	type lastEditedTime struct {
+		OnOrAfter string `json:"on_or_after"`
 	}
 
-	b, err := json.Marshal(request{StartCursor: startCursor, PageSize: queryPageSize})
+	type timeFilter struct {
+		TimeStamp      string         `json:"timestamp"`
+		LastEditedTime lastEditedTime `json:"last_edited_time"`
+	}
+
+	type request struct {
+		StartCursor string      `json:"start_cursor,omitempty"`
+		PageSize    int         `json:"page_size"`
+		TimeFilter  *timeFilter `json:"filter,omitempty"`
+	}
+
+	r := request{StartCursor: startCursor, PageSize: queryPageSize}
+	if since != nil {
+		sinceFormatted := since.UTC().Format(time.RFC3339)
+		r.TimeFilter = &timeFilter{TimeStamp: "last_edited_time", LastEditedTime: lastEditedTime{OnOrAfter: sinceFormatted}}
+	}
+	b, err := json.Marshal(r)
 	if err != nil {
-		return []page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
 	}
 
 	payload := bytes.NewReader(b)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
 	if err != nil {
-		return []page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
 	}
 	addDefaultHeaders(req, apiVersion, apiToken)
 
 	res, err := client.Do(req)
 	if err != nil {
-		return []page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
 	}
 	defer res.Body.Close()
 
 	bytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		return []page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
 	}
 
 	err = handleErrorResponse(res, bytes)
 	if err != nil {
-		return []page{}, "", false, err
+		return []Page{}, "", false, err
 	}
 
 	var qr queryResult
 	err = json.Unmarshal(bytes, &qr)
 	if err != nil {
-		return []page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
 	}
 
 	return qr.Results, qr.NextCursor, qr.HasMore, nil

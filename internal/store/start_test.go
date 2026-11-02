@@ -82,7 +82,11 @@ func TestStartNewTimer_MissingContext(t *testing.T) {
 	// The first migration always creates the context, so it can only be missing if something
 	// outside tt changed the database. The insert selects its context_id from contexts, so
 	// with no context it inserts nothing
-	_, err := st.connectionPool.ExecContext(t.Context(), "DELETE FROM contexts WHERE id = ?", testContextID)
+	_, err := st.connectionPool.ExecContext(t.Context(),
+		`
+		DELETE FROM cache_state WHERE context_id = ?;
+		DELETE FROM contexts WHERE id = ?;
+	`, testContextID, testContextID)
 	if err != nil {
 		t.Fatalf("delete context failed: %v", err)
 	}
@@ -176,7 +180,11 @@ func TestSwitchTimer_MissingContext(t *testing.T) {
 
 	// See TestStartNewTimer_MissingContext. No entries exist, as the foreign key on
 	// entries.context_id stops the context being deleted while one refers to it
-	_, err := st.connectionPool.ExecContext(t.Context(), "DELETE FROM contexts WHERE id = ?", testContextID)
+	_, err := st.connectionPool.ExecContext(t.Context(),
+		`
+		DELETE FROM cache_state WHERE context_id = ?;
+		DELETE FROM contexts WHERE id = ?;
+	`, testContextID, testContextID)
 	if err != nil {
 		t.Fatalf("delete context failed: %v", err)
 	}

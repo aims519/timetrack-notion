@@ -110,7 +110,7 @@ Entries display their description, else the task name. Descriptions are at most 
 
 | Command | Behaviour |
 |---|---|
-| `tt init [--tasks-db ID] [--projects-db ID] [--parent-page ID] [--project NAME]` | Connects the context to Notion (§5). Every prompt has a flag. Safe to re-run; also how the default project is changed. |
+| `tt init [--tasks-db ID] [--projects-db ID] [--parent-page ID] [--project NAME]` | Connects the context to Notion (§5). `--tasks-db` and `--projects-db` take database IDs, as shown in each database's URL; `init` looks up their data sources. Every prompt has a flag. Safe to re-run; also how the default project is changed. |
 | `tt task list [--project NAME] [--all] [--limit N]` | Cached tasks with order, short ID and name; open tasks in the current project by default, `--all` adds done tasks. How scripts discover task IDs. |
 | `tt task refresh [--full]` | Refreshes now, ignoring TTL and back-off. `--full` also detects deleted or trashed tasks. |
 
@@ -131,9 +131,9 @@ Exactly one row in v1.
 | Column | Notes |
 |---|---|
 | `id` | PK. UUID, never changed. |
-| `tasks_db_id`* | Notion data-source ID of the tasks database. Null until `init`. |
-| `projects_db_id`* | Notion data-source ID of the projects database. Null until `init`. |
-| `entries_db_id`* | Notion data-source ID of the Time entries database. Null means **local-only**; there's no separate flag. |
+| `tasks_data_source_id`* | Notion data-source ID of the tasks database. Null until `init`. |
+| `projects_data_source_id`* | Notion data-source ID of the projects database. Null until `init`. |
+| `entries_data_source_id`* | Notion data-source ID of the Time entries database. Null means **local-only**; there's no separate flag. |
 | `property_map`* | JSON: the names of the task name, project, order and done properties. Null until `init`. |
 | `default_project_page_id`* | Null if no default project. |
 | `created_at` | |
@@ -236,7 +236,7 @@ Parent page (shared with the integration)
 `init` checks before creating anything, so re-running reuses what exists:
 
 1. Validate `NOTION_TOKEN` with a "who am I" call; if unset, `no_token`.
-2. Find the tasks and projects databases; if none are visible, say which page to share.
+2. Find the tasks and projects databases, by the IDs given in `--tasks-db` and `--projects-db` or at the prompts, and look up each one's data source (`GET /v1/databases/{id}` lists its `data_sources`). If none are visible, say which page to share.
 3. Map the task properties (name, project, order, done), detecting defaults.
 4. Create the **Time entries** database under the parent page:
 
@@ -249,7 +249,7 @@ Parent page (shared with the integration)
    | Local ID | text |
    | Minutes | formula: whole minutes from Start to End |
 
-5. Choose a default project, store the Notion IDs in one transaction, and do a full task refresh. Report how many earlier entries are waiting and suggest `tt attach --entry`.
+5. Choose a default project, store the data-source IDs (the Time entries one comes from the create response) in one transaction, and do a full task refresh. Report how many earlier entries are waiting and suggest `tt attach --entry`.
 6. Print the steps for adding a `Tracked (min)` rollup to the tasks database by hand. Nothing depends on it.
 
 Notion computes all totals; the tool never writes a duration, and never touches existing hand-maintained fields.
@@ -529,6 +529,7 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **8.** Short IDs are relative to the cache and may lengthen; scripts should store full page IDs.
 - **9.** Overlaps are allowed with a warning; rejecting them without `--force` would stop double counting at the cost of friction. Revisit after real use.
 - **19.** Probe still needed (on `2026-03-11`): trashing an already-trashed page, and retrieving a trashed page reporting `in_trash` (§6.1, §6.3).
+- **23.** A tasks or projects database with more than one data source: whether `init` asks which to use or fails with `usage`, listing them.
 
 ### Resolved
 
@@ -544,3 +545,4 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **18.** Network failures are counted per attempt; 3 in a row stop the run with entries left `pending` (exit 6); `failed` is only for persistent 429/5xx.
 - **20.** The data directory follows XDG: `$XDG_DATA_HOME/tt` on any OS, else `%LOCALAPPDATA%\tt` on Windows (local, not roaming, because a database shouldn't sync between machines) and `~/.local/share/tt` elsewhere. It's always the directory holding the database, and each database gets its own lock file beside it, so two databases never share a lock. An empty `TT_DB` is an error, not a request for the default, and a `TT_DB` path's parent must already exist. Rejected: a visible `~/tt` (clutters the home directory) and `~/Library/Application Support` on macOS (awkward to type, and developer CLIs commonly use XDG there).
 - **21.** Migrations run with goose, so `schema_migrations` has goose's layout (§4) rather than `(version, applied_at)`, and files are numbered sequentially rather than by timestamp. Goose doesn't re-check the version inside each migration's transaction, so concurrent first runs are serialised with a lock file instead ([#9](https://github.com/aims519/timetrack-notion/issues/9)). Rejected: a hand-written runner (more code to own for no v1 gain) and idempotent migrations (goose would still record a version twice).
+- **22.** `init` takes database IDs, not data-source IDs, because a database ID is in the database's URL and easy to find, while a data-source ID is buried in Notion's settings. `init` resolves each to its data source, and `contexts` stores the data-source IDs (§4), since queries go through data sources (§10).

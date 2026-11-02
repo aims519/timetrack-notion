@@ -164,7 +164,7 @@ func TestReadStatus_Connected(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
-			_, err := st.connectionPool.ExecContext(t.Context(), "UPDATE contexts SET tasks_db_id = ? WHERE id = ?", tc.tasksDBID, testContextID)
+			_, err := st.connectionPool.ExecContext(t.Context(), "UPDATE contexts SET tasks_data_source_id = ? WHERE id = ?", tc.tasksDBID, testContextID)
 			if err != nil {
 				t.Fatalf("update context failed: %v", err)
 			}
@@ -185,7 +185,11 @@ func TestReadStatus_MissingContext(t *testing.T) {
 	st := openTestStore(t, dbPath)
 
 	// See TestStartNewTimer_MissingContext
-	_, err := st.connectionPool.ExecContext(t.Context(), "DELETE FROM contexts WHERE id = ?", testContextID)
+	_, err := st.connectionPool.ExecContext(t.Context(),
+		`
+		DELETE FROM cache_state WHERE context_id = ?;
+		DELETE FROM contexts WHERE id = ?;
+	`, testContextID, testContextID)
 	if err != nil {
 		t.Fatalf("delete context failed: %v", err)
 	}

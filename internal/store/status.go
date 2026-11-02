@@ -73,8 +73,8 @@ func (s *Store) ReadStatus(ctx context.Context, todayStartUTC, todayEndUTC time.
 
 // contextConnected checks if the default context has the Notion tasks_db_id set, and returns true if so
 func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, error) {
-	var tasksDBID *string
-	err := tx.QueryRowContext(ctx, "SELECT tasks_db_id from contexts WHERE id = ?", defaultContextID).Scan(&tasksDBID)
+	var tasksDataSourceID *string
+	err := tx.QueryRowContext(ctx, "SELECT tasks_data_source_id from contexts WHERE id = ?", defaultContextID).Scan(&tasksDataSourceID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "no context found", Details: map[string]any{"path": dbPath}}
 	}
@@ -82,7 +82,7 @@ func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, err
 		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query database context", Cause: err, Details: map[string]any{"path": dbPath}}
 	}
 
-	return tasksDBID != nil, nil
+	return tasksDataSourceID != nil, nil
 }
 
 // entriesStartedToday returns all entries that were started during the provided start and end times

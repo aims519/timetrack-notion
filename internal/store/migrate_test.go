@@ -34,7 +34,7 @@ func TestApplyMigrations_NewDatabase(t *testing.T) {
 	// Check the context is local-only, with a canonical UUID and an RFC 3339 created_at
 	var contextID, createdAt string
 	var entriesDBID sql.NullString
-	err := st.connectionPool.QueryRowContext(t.Context(), "SELECT id, entries_db_id, created_at FROM contexts").Scan(&contextID, &entriesDBID, &createdAt)
+	err := st.connectionPool.QueryRowContext(t.Context(), "SELECT id, entries_data_source_id, created_at FROM contexts").Scan(&contextID, &entriesDBID, &createdAt)
 	if err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
@@ -45,11 +45,58 @@ func TestApplyMigrations_NewDatabase(t *testing.T) {
 		t.Errorf("got context_id = %q, want canonical form %q", contextID, parsed.String())
 	}
 	if entriesDBID.Valid {
-		t.Errorf("got entries_db_id = %q, want NULL (local-only)", entriesDBID.String)
+		t.Errorf("got entries_data_source_id = %q, want NULL (local-only)", entriesDBID.String)
 	}
 	_, err = time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
 		t.Errorf("got created_at = %q, failed to parse as RFC 3339: %v", createdAt, err)
+	}
+}
+
+func TestApplyMigrations_CacheStateCreated(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	// The task and project caches start empty
+	for _, table := range []string{"tasks", "projects"} {
+		if got := countRows(t, st.connectionPool, table); got != 0 {
+			t.Errorf("got %v rows in %s, want 0", got, table)
+		}
+	}
+
+	// Exactly one cache_state row, so refreshes can always UPDATE it
+	if got := countRows(t, st.connectionPool, "cache_state"); got != 1 {
+		t.Fatalf("got %v cache_state rows, want 1", got)
+	}
+
+	// The row belongs to the context, and nothing has been refreshed yet (DESIGN.md §4)
+	var contextID string
+	var tasksRefreshedAt, tasksRefreshFailedAt, tasksFullRefreshedAt, projectsRefreshedAt sql.NullString
+	err := st.connectionPool.QueryRowContext(t.Context(), `
+		SELECT cs.context_id, cs.tasks_refreshed_at, cs.tasks_refresh_failed_at,
+			cs.tasks_full_refreshed_at, cs.projects_refreshed_at
+		FROM cache_state cs
+		JOIN contexts c ON c.id = cs.context_id`,
+	).Scan(&contextID, &tasksRefreshedAt, &tasksRefreshFailedAt, &tasksFullRefreshedAt, &projectsRefreshedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cache_state row doesn't match the context")
+	}
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	timestamps := []struct {
+		column string
+		value  sql.NullString
+	}{
+		{"tasks_refreshed_at", tasksRefreshedAt},
+		{"tasks_refresh_failed_at", tasksRefreshFailedAt},
+		{"tasks_full_refreshed_at", tasksFullRefreshedAt},
+		{"projects_refreshed_at", projectsRefreshedAt},
+	}
+	for _, ts := range timestamps {
+		if ts.value.Valid {
+			t.Errorf("got %s = %q, want NULL", ts.column, ts.value.String)
+		}
 	}
 }
 

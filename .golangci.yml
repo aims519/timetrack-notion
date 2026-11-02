@@ -1,0 +1,11 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # Closing a response body (or any value used through io.Closer)
+        # after reading it has no actionable error. Concrete types such as
+        # *os.File are still checked, since their Close can report a failed
+        # write.
+        - (io.Closer).Close

@@ -69,3 +69,14 @@ func (s *Store) CacheState(ctx context.Context) (CacheState, error) {
 
 	return result, nil
 }
+
+type Task struct {
+	ContextID      string
+	PageID         string
+	Name           string
+	ProjectPageID  *string
+	SortOrder      *float64
+	Done           bool
+	LastEditedTime time.Time
+	GoneAt         *time.Time
+}

@@ -416,7 +416,8 @@ This is the run shown in §6.4, and it exits 1. Per-entry codes are `rate_limite
 | `list` | `entries`, `total_minutes`, `truncated`, `warnings` |
 | `task list` | `tasks`, `truncated`, `warnings` |
 | `sync` | `results`, `summary`, `warnings` (`sync` document, above) |
-| `init`, `task refresh` | fixed when built |
+| `task refresh` | `full`, `refreshed_at` (as stored in `tasks_refreshed_at`), `fetched` (pages Notion returned, including any re-fetched by the overlap), `gone` (tasks this refresh found gone; `null` unless `--full`), `duration_ms`, `warnings` |
+| `init` | fixed when built |
 
 In `status` and `list`, today's minutes include the running entry's elapsed minutes (same clock reading as `elapsed_seconds`), so the two agree. A timer left running from yesterday isn't part of today; `stale_timer` flags it.
 
@@ -457,7 +458,7 @@ Example, `tt status` before `init`:
 | 3 | Not found or ambiguous | `not_found`, `ambiguous_selector` |
 | 4 | State conflict | `timer_running`, `no_timer_running`, `sync_busy` |
 | 5 | Config, auth, local store, or not connected | `not_initialised`, `no_token`, `access_denied`, `database_too_new`, `database_unusable` |
-| 6 | Notion unreachable (`sync` only) | `offline` |
+| 6 | Notion unreachable (no response, or the request timed out) | `offline` |
 | 10 | Internal error (no stack traces) | `internal` |
 
 **`details`** is `null` except for:
@@ -465,7 +466,7 @@ Example, `tt status` before `init`:
 | Code | `details` |
 |---|---|
 | `timer_running` | `{"entry": <entry>}` |
-| `offline` | `{"synced": n, "pending": n}` |
+| `offline` | `{"synced": n, "pending": n}` from `sync`; `null` from other commands |
 | `ambiguous_selector` | `{"selector": "...", "candidates": [<task items>]}` |
 | `not_found` | `{"selector": "..."}` |
 | `invalid_time` | `{"input": "..."}` |

@@ -5,8 +5,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
@@ -31,7 +34,7 @@ func TestQueryDataSource_SingleResultReturned(t *testing.T) {
 
 	nc := NewClient(s.URL, "test-token", s.Client())
 
-	pages, err := nc.QueryDataSource(t.Context(), "1234")
+	pages, err := nc.QueryDataSource(t.Context(), "1234", nil)
 	if err != nil {
 		t.Fatalf("unexpected response: %v", err)
 	}
@@ -111,7 +114,7 @@ func TestQueryDataSource_PaginatedResultsReturned(t *testing.T) {
 
 	nc := NewClient(s.URL, "test-token", s.Client())
 
-	pages, err := nc.QueryDataSource(t.Context(), "1234")
+	pages, err := nc.QueryDataSource(t.Context(), "1234", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -210,7 +213,7 @@ func TestQueryDataSource_ErrorResponse_ReturnsCLIError(t *testing.T) {
 
 			nc := NewClient(s.URL, "test-token", s.Client())
 
-			pages, err := nc.QueryDataSource(t.Context(), "1234")
+			pages, err := nc.QueryDataSource(t.Context(), "1234", nil)
 			if err == nil {
 				t.Fatalf("expected an error for HTTP %d, got nil", tc.status)
 			}
@@ -293,8 +296,9 @@ func TestQueryDataSource_RequestShape(t *testing.T) {
 			return
 		}
 
-		// encoding/json decodes JSON numbers into float64 when the target is any.
-		if got, want := body["page_size"], float64(queryPageSize); got != want {
+		// 100 is the most Notion returns per request: fewer means more requests, and more is
+		// rejected. encoding/json decodes JSON numbers into float64 when the target is any.
+		if got, want := body["page_size"], float64(100); got != want {
 			t.Errorf("request %d: page_size = %v, want %v", n, got, want)
 		}
 
@@ -322,11 +326,211 @@ func TestQueryDataSource_RequestShape(t *testing.T) {
 
 	nc := NewClient(s.URL, token, s.Client())
 
-	if _, err := nc.QueryDataSource(t.Context(), dataSourceID); err != nil {
+	if _, err := nc.QueryDataSource(t.Context(), dataSourceID, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if got := requests.Load(); got != 2 {
 		t.Errorf("unexpected request count. Got %d, want 2", got)
+	}
+}
+
+func TestQueryDataSource_SinceFilter(t *testing.T) {
+	const maxRequests = 5
+
+	// Notion's timestamp filter on last_edited_time. The value is RFC 3339 in UTC,
+	// without fractional seconds.
+	sinceFilter := func(onOrAfter string) map[string]any {
+		return map[string]any{
+			"timestamp": "last_edited_time",
+			"last_edited_time": map[string]any{
+				"on_or_after": onOrAfter,
+			},
+		}
+	}
+
+	utc := time.Date(2026, 11, 2, 8, 58, 0, 0, time.UTC)
+	plusOne := time.FixedZone("UTC+1", 60*60)
+	inPlusOne := time.Date(2026, 11, 2, 9, 58, 0, 0, plusOne) // 08:58 UTC
+	withNanos := time.Date(2026, 11, 2, 8, 58, 0, 123456789, time.UTC)
+
+	tests := []struct {
+		name       string
+		since      *time.Time
+		wantFilter map[string]any // nil means the request has no filter key
+	}{
+		{
+			name:       "no since sends no filter",
+			since:      nil,
+			wantFilter: nil,
+		},
+		{
+			name:       "since in UTC",
+			since:      &utc,
+			wantFilter: sinceFilter("2026-11-02T08:58:00Z"),
+		},
+		// Edge cases
+		{
+			name:       "since in another zone is sent as UTC",
+			since:      &inPlusOne,
+			wantFilter: sinceFilter("2026-11-02T08:58:00Z"),
+		},
+		{
+			name:       "fractional seconds are dropped",
+			since:      &withNanos,
+			wantFilter: sinceFilter("2026-11-02T08:58:00Z"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Two pages, so the test also checks the filter is sent with the cursor,
+			// not only on the first request
+			responses := map[string]string{
+				"": `{
+					"object": "list",
+					"has_more": true,
+					"next_cursor": "cursor-2",
+					"results": [{"object": "page", "id": "page-1"}]
+				}`,
+				"cursor-2": `{
+					"object": "list",
+					"has_more": false,
+					"next_cursor": null,
+					"results": [{"object": "page", "id": "page-2"}]
+				}`,
+			}
+
+			var requests atomic.Int32
+
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				n := requests.Add(1)
+				if n > maxRequests {
+					t.Errorf("client made more than %d requests", maxRequests)
+					writeBadRequest(t, w, "too many requests from client")
+					return
+				}
+
+				// Decode into a map, so a missing filter key can be told apart from an empty one
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("request %d: decoding body: %v", n, err)
+					writeBadRequest(t, w, "invalid request body")
+					return
+				}
+
+				filter, hasFilter := body["filter"]
+				switch {
+				case tc.wantFilter == nil && hasFilter:
+					t.Errorf("request %d: filter = %v, want the key to be omitted", n, filter)
+				case tc.wantFilter != nil && !hasFilter:
+					t.Errorf("request %d: no filter, want %v", n, tc.wantFilter)
+				case tc.wantFilter != nil && !reflect.DeepEqual(filter, tc.wantFilter):
+					t.Errorf("request %d: filter = %v, want %v", n, filter, tc.wantFilter)
+				}
+
+				cursor, _ := body["start_cursor"].(string)
+				res, ok := responses[cursor]
+				if !ok {
+					t.Errorf("request %d: unexpected start_cursor %q", n, cursor)
+					writeBadRequest(t, w, "unknown start_cursor")
+					return
+				}
+
+				if _, err := w.Write([]byte(res)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			pages, err := nc.QueryDataSource(t.Context(), "1234", tc.since)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got := requests.Load(); got != 2 {
+				t.Errorf("unexpected request count. Got %d, want 2", got)
+			}
+
+			if len(pages) != 2 {
+				t.Errorf("unexpected result count. Got %d, want 2", len(pages))
+			}
+		})
+	}
+}
+
+// When Notion can't be reached there's no HTTP status to map, so the error is offline (DESIGN.md §8)
+func TestQueryDataSource_Unreachable_ReturnsOffline(t *testing.T) {
+	const token = "secret-test-token"
+
+	tests := []struct {
+		name      string
+		newClient func(t *testing.T) *Client
+	}{
+		{
+			name: "server not listening",
+			newClient: func(t *testing.T) *Client {
+				// NewTestServer's in-memory network accepts every connection, even once the server is
+				// closed, so this case needs NewServer's real loopback listener to get a refusal
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("unexpected request to a closed server: %s %s", r.Method, r.URL.Path)
+				}))
+				nc := NewClient(s.URL, token, s.Client())
+
+				// Closing it straight away leaves a URL that refuses connections
+				s.Close()
+
+				return nc
+			},
+		},
+		{
+			name: "request times out",
+			newClient: func(t *testing.T) *Client {
+				// The handler never answers. Over the in-memory network it isn't told when the client
+				// gives up, so it waits to be released instead. Cleanups run last first, so release
+				// runs before the server's own cleanup, whose Close waits for the handler to return
+				release := make(chan struct{})
+				s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					<-release
+				}))
+				t.Cleanup(func() { close(release) })
+
+				httpClient := s.Client()
+				httpClient.Timeout = 50 * time.Millisecond
+
+				return NewClient(s.URL, token, httpClient)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nc := tc.newClient(t)
+
+			pages, err := nc.QueryDataSource(t.Context(), "1234", nil)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+
+			if len(pages) != 0 {
+				t.Errorf("expected no pages alongside an error, got %d", len(pages))
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != clierr.Offline {
+				t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+			}
+
+			// The cause is printed with the error, so it must never carry the token (DESIGN.md §9)
+			if strings.Contains(err.Error(), token) || (ce.Cause != nil && strings.Contains(ce.Cause.Error(), token)) {
+				t.Errorf("error includes the token: %v", err)
+			}
+		})
 	}
 }

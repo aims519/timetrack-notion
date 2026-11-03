@@ -74,7 +74,7 @@ func (s *Store) ReadStatus(ctx context.Context, todayStartUTC, todayEndUTC time.
 // contextConnected checks if the default context has the Notion tasks_db_id set, and returns true if so
 func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, error) {
 	var tasksDataSourceID *string
-	err := tx.QueryRowContext(ctx, "SELECT tasks_data_source_id from contexts WHERE id = ?", defaultContextID).Scan(&tasksDataSourceID)
+	err := tx.QueryRowContext(ctx, "SELECT tasks_data_source_id from contexts WHERE id = ?", DefaultContextID).Scan(&tasksDataSourceID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "no context found", Details: map[string]any{"path": dbPath}}
 	}

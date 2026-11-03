@@ -4,13 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/google/uuid"
 )
 
-const defaultContextID = "00000000-0000-0000-0000-000000000000"
+const DefaultContextID = "00000000-0000-0000-0000-000000000000"
 
 func tryStopRunningEntry(ctx context.Context, tx *sql.Tx, endUTC, nowUTC time.Time, dbPath string) (uuid.UUID, error) {
 	runningEntryID, runningEntryStart, found, err := findRunningEntry(ctx, tx, dbPath)
@@ -122,4 +123,9 @@ func findRunningEntry(ctx context.Context, tx *sql.Tx, dbPath string) (id uuid.U
 	}
 
 	return runningEntryID, startUTC, true, err
+}
+
+// SanitiseID removes dashes before saving an ID to the store
+func SanitiseID(id string) string {
+	return strings.ReplaceAll(id, "-", "")
 }

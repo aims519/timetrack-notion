@@ -3,11 +3,14 @@ package cli
 import (
 	"context"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
+	"github.com/aims519/timetrack-notion/internal/notion"
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
 	"github.com/spf13/cobra"
@@ -46,22 +49,21 @@ func newRootCmd(a *app) *cobra.Command {
 	rootCmd.AddCommand(newStartCmd(a))
 	rootCmd.AddCommand(newStopCmd(a))
 	rootCmd.AddCommand(newStatusCmd(a))
+	rootCmd.AddCommand(newTaskCmd(a))
 
 	return rootCmd
 }
 
 // app holds a pointer to the db connection pool so that Run can safely close it
 type app struct {
-	db     *store.Store
-	format *output.Format
+	db               *store.Store
+	format           *output.Format
+	notionBaseURL    string
+	notionHTTPClient *http.Client
 }
 
-// Run builds the root command with args and executes it, writing output to stdout or stderr
-func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	format := output.Table // default
-	a := app{format: &format}
-
-	root := newRootCmd(&a)
+func run(ctx context.Context, a *app, args []string, stdout, stderr io.Writer) int {
+	root := newRootCmd(a)
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
@@ -75,16 +77,25 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	if err != nil {
-		printError(stderr, format, err)
+		printError(stderr, *a.format, err)
 		return exitCode(err)
 	}
 
 	if closeErr != nil {
-		printError(stderr, format, closeErr)
+		printError(stderr, *a.format, closeErr)
 		return exitCode(closeErr)
 	}
 
 	return 0 // success
+}
+
+// Run builds the root command with args and executes it, writing output to stdout or stderr
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	format := output.Table                              // default
+	httpClient := http.Client{Timeout: 5 * time.Second} // 5 seconds per request
+	a := app{format: &format, notionBaseURL: notion.BaseURL, notionHTTPClient: &httpClient}
+
+	return run(ctx, &a, args, stdout, stderr)
 }
 
 func dbFilePathPerOS(goos string) (string, error) {

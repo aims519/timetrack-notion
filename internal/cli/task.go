@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"time"
 
@@ -47,13 +46,12 @@ func newRefreshCmd(a *app) *cobra.Command {
 			}
 
 			c := &refreshClock{}
-			httpClient := http.Client{Timeout: 5 * time.Second} // 5 seconds per request
 			token, exists := os.LookupEnv("NOTION_TOKEN")
 			if !exists || token == "" {
 				return &clierr.Error{Code: clierr.NoToken, Message: "Notion API token not set (NOTION_TOKEN)"}
 			}
 
-			notionClient := notion.NewClient(notion.BaseURL, token, &httpClient)
+			notionClient := notion.NewClient(a.notionBaseURL, token, a.notionHTTPClient)
 
 			doc, err := executeRefreshUpdates(cmd.Context(), a, c, notionClient, fullRefresh)
 			if err != nil {

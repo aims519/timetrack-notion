@@ -296,8 +296,9 @@ func TestQueryDataSource_RequestShape(t *testing.T) {
 			return
 		}
 
-		// encoding/json decodes JSON numbers into float64 when the target is any.
-		if got, want := body["page_size"], float64(queryPageSize); got != want {
+		// 100 is the most Notion returns per request: fewer means more requests, and more is
+		// rejected. encoding/json decodes JSON numbers into float64 when the target is any.
+		if got, want := body["page_size"], float64(100); got != want {
 			t.Errorf("request %d: page_size = %v, want %v", n, got, want)
 		}
 

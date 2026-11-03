@@ -81,10 +81,10 @@ type Task struct {
 	GoneAt         *time.Time
 }
 
-func (s *Store) RefreshTasks(ctx context.Context, tasks []Task, nowUTC time.Time, fullRefresh bool) error {
+func (s *Store) RefreshTasks(ctx context.Context, tasks []Task, nowUTC time.Time, fullRefresh bool) (goneCount *int, err error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
-		return &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
+		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -101,7 +101,7 @@ func (s *Store) RefreshTasks(ctx context.Context, tasks []Task, nowUTC time.Time
 			gone_at = NULL
 	`)
 	if err != nil {
-		return &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't prepare statement", Cause: err, Details: map[string]any{"path": s.dbPath}}
+		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't prepare statement", Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}
 	defer func() { _ = upsertTaskStmt.Close() }()
 
@@ -115,14 +115,14 @@ func (s *Store) RefreshTasks(ctx context.Context, tasks []Task, nowUTC time.Time
 		AND gone_at IS NULL
 	`, ToDBString(nowUTC), DefaultContextID)
 		if err != nil {
-			return &clierr.Error{Code: clierr.Internal, Message: "error updating cached task", Cause: err}
+			return nil, &clierr.Error{Code: clierr.Internal, Message: "error updating cached task", Cause: err}
 		}
 	}
 
 	for _, t := range tasks {
 		_, err = upsertTaskStmt.ExecContext(ctx, t.ContextID, t.PageID, t.Name, t.ProjectPageID, t.SortOrder, t.Done, ToDBString(t.LastEditedTime))
 		if err != nil {
-			return &clierr.Error{Code: clierr.Internal, Message: "error writing cached task", Cause: err}
+			return nil, &clierr.Error{Code: clierr.Internal, Message: "error writing cached task", Cause: err}
 		}
 	}
 
@@ -133,26 +133,37 @@ func (s *Store) RefreshTasks(ctx context.Context, tasks []Task, nowUTC time.Time
 		WHERE context_id = ?
 	`, ToDBString(nowUTC), DefaultContextID)
 	if err != nil {
-		return &clierr.Error{Code: clierr.Internal, Message: "error updating cache_state row", Cause: err}
+		return nil, &clierr.Error{Code: clierr.Internal, Message: "error updating cache_state row", Cause: err}
 	}
 
 	if fullRefresh {
 		_, err = tx.ExecContext(ctx, `
-		UPDATE cache_state
-		SET tasks_full_refreshed_at = ?
-		WHERE context_id = ?
-	`, ToDBString(nowUTC), DefaultContextID)
+			UPDATE cache_state
+			SET tasks_full_refreshed_at = ?
+			WHERE context_id = ?
+		`, ToDBString(nowUTC), DefaultContextID)
 		if err != nil {
-			return &clierr.Error{Code: clierr.Internal, Message: "error updating cache_state row", Cause: err}
+			return nil, &clierr.Error{Code: clierr.Internal, Message: "error updating cache_state row", Cause: err}
+		}
+
+		// return number of tasks marked as gone during this refresh
+		err = tx.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM tasks
+			WHERE gone_at = ?
+			AND tasks.context_id = ?
+		`, ToDBString(nowUTC), DefaultContextID).Scan(&goneCount)
+		if err != nil {
+			return nil, &clierr.Error{Code: clierr.Internal, Message: "error querying tasks gone count", Cause: err}
 		}
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return &clierr.Error{Code: clierr.Internal, Message: "error committing transaction", Cause: err}
+		return nil, &clierr.Error{Code: clierr.Internal, Message: "error committing transaction", Cause: err}
 	}
 
-	return nil
+	return goneCount, nil
 }
 
 // RecordTasksRefreshFailed updates the cache_state.tasks_refresh_failed_at value with the current time,

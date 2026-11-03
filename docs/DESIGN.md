@@ -416,7 +416,8 @@ This is the run shown in §6.4, and it exits 1. Per-entry codes are `rate_limite
 | `list` | `entries`, `total_minutes`, `truncated`, `warnings` |
 | `task list` | `tasks`, `truncated`, `warnings` |
 | `sync` | `results`, `summary`, `warnings` (`sync` document, above) |
-| `init`, `task refresh` | fixed when built |
+| `task refresh` | `full`, `refreshed_at` (as stored in `tasks_refreshed_at`), `fetched` (pages Notion returned, including any re-fetched by the overlap), `gone` (tasks this refresh found gone; `null` unless `--full`), `duration_ms`, `warnings` |
+| `init` | fixed when built |
 
 In `status` and `list`, today's minutes include the running entry's elapsed minutes (same clock reading as `elapsed_seconds`), so the two agree. A timer left running from yesterday isn't part of today; `stale_timer` flags it.
 

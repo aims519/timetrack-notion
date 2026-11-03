@@ -19,11 +19,17 @@ type clock interface {
 	NowUTC() time.Time
 }
 
-func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, dataSourceID string, full bool) error {
+type RefreshResult struct {
+	RefreshedAt  time.Time
+	FetchedCount int
+	GoneCount    *int
+}
+
+func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, dataSourceID string, full bool) (RefreshResult, error) {
 	// Fetch last refresh from DB
 	cacheState, err := s.CacheState(ctx)
 	if err != nil {
-		return err
+		return RefreshResult{}, err
 	}
 
 	nowUTC := c.NowUTC()
@@ -39,7 +45,7 @@ func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, 
 		// overall refresh timeout should not apply here since we always want this write to succeed
 		ctx = context.WithoutCancel(ctx)
 		_ = s.RecordTasksRefreshFailed(ctx, nowUTC)
-		return err
+		return RefreshResult{}, err
 	}
 
 	tasks := make([]store.Task, len(pages))
@@ -48,12 +54,18 @@ func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, 
 	}
 
 	// Sync to DB, map pages to Tasks
-	err = s.RefreshTasks(ctx, tasks, nowUTC, full)
+	goneCount, err := s.RefreshTasks(ctx, tasks, nowUTC, full)
 	if err != nil {
-		return err
+		return RefreshResult{}, err
 	}
 
-	return nil
+	result := RefreshResult{
+		RefreshedAt:  nowUTC,
+		FetchedCount: len(tasks),
+		GoneCount:    goneCount,
+	}
+
+	return result, nil
 }
 
 func mapPageToTask(p notion.Page, contextID string) store.Task {

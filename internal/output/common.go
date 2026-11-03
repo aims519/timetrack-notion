@@ -56,3 +56,11 @@ func formatMinutes(totalMinutes int) string {
 
 	return fmt.Sprintf("%dh %dm", hours, minutes)
 }
+
+func formatMilliseconds(d time.Duration) string {
+	if d.Seconds() < 1 {
+		return d.Round(time.Millisecond).String()
+	}
+
+	return d.Round(100 * time.Millisecond).String()
+}

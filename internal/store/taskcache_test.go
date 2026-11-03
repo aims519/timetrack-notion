@@ -228,7 +228,7 @@ func TestRefreshTasks_WritesTask(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 
-			if err := st.RefreshTasks(t.Context(), []Task{tc.task}, refreshNow, false); err != nil {
+			if _, err := st.RefreshTasks(t.Context(), []Task{tc.task}, refreshNow, false); err != nil {
 				t.Fatalf("RefreshTasks() want nil error, got %v", err)
 			}
 
@@ -265,7 +265,7 @@ func TestRefreshTasks_UpdatesExistingTask(t *testing.T) {
 		ContextID: testContextID, PageID: "page1", Name: "New name",
 		ProjectPageID: nil, SortOrder: nil, Done: true, LastEditedTime: refreshNow,
 	}
-	if err := st.RefreshTasks(t.Context(), []Task{updated}, refreshNow, false); err != nil {
+	if _, err := st.RefreshTasks(t.Context(), []Task{updated}, refreshNow, false); err != nil {
 		t.Fatalf("RefreshTasks() want nil error, got %v", err)
 	}
 
@@ -288,24 +288,28 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 		returned []string // page IDs of the tasks passed to RefreshTasks
 		full     bool
 		want     map[string]*time.Time // gone_at for each page ID; nil means not gone
+		wantGone *int                  // the count RefreshTasks returns; nil for an incremental refresh
 	}{
 		{
 			name:     "incremental leaves missing tasks alone",
 			existing: []existing{{"a", nil}, {"b", nil}, {"c", nil}},
 			returned: []string{"a"},
 			want:     map[string]*time.Time{"a": nil, "b": nil, "c": nil},
+			wantGone: nil,
 		},
 		{
 			name:     "incremental clears gone_at of a returned task",
 			existing: []existing{{"a", &refreshEarlier}},
 			returned: []string{"a"},
 			want:     map[string]*time.Time{"a": nil},
+			wantGone: nil,
 		},
 		{
 			name:     "incremental with no tasks changes nothing",
 			existing: []existing{{"a", nil}, {"b", &refreshEarlier}},
 			returned: nil,
 			want:     map[string]*time.Time{"a": nil, "b": &refreshEarlier},
+			wantGone: nil,
 		},
 		{
 			name:     "full marks missing tasks gone",
@@ -313,6 +317,7 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 			returned: []string{"a"},
 			full:     true,
 			want:     map[string]*time.Time{"a": nil, "b": &refreshNow, "c": &refreshNow},
+			wantGone: ptr(2),
 		},
 		{
 			name:     "full keeps every returned task",
@@ -320,6 +325,7 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 			returned: []string{"a", "b", "c"},
 			full:     true,
 			want:     map[string]*time.Time{"a": nil, "b": nil, "c": nil},
+			wantGone: ptr(0),
 		},
 		{
 			name:     "full clears gone_at of a returned task",
@@ -327,6 +333,7 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 			returned: []string{"a"},
 			full:     true,
 			want:     map[string]*time.Time{"a": nil},
+			wantGone: ptr(0),
 		},
 		{
 			name:     "full adds new tasks and marks missing ones gone",
@@ -334,6 +341,7 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 			returned: []string{"b", "c"},
 			full:     true,
 			want:     map[string]*time.Time{"a": &refreshNow, "b": nil, "c": nil},
+			wantGone: ptr(1),
 		},
 		// Edge cases
 		{
@@ -342,6 +350,7 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 			returned: []string{"a"},
 			full:     true,
 			want:     map[string]*time.Time{"a": nil, "b": &refreshEarlier},
+			wantGone: ptr(0),
 		},
 		{
 			name:     "full with no tasks marks every task gone",
@@ -349,6 +358,7 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 			returned: nil,
 			full:     true,
 			want:     map[string]*time.Time{"a": &refreshNow, "b": &refreshNow},
+			wantGone: ptr(2),
 		},
 	}
 
@@ -371,8 +381,19 @@ func TestRefreshTasks_GoneAt(t *testing.T) {
 				tasks[i] = Task{ContextID: testContextID, PageID: id, Name: "Returned task", LastEditedTime: refreshNow}
 			}
 
-			if err := st.RefreshTasks(t.Context(), tasks, refreshNow, tc.full); err != nil {
+			gotGone, err := st.RefreshTasks(t.Context(), tasks, refreshNow, tc.full)
+			if err != nil {
 				t.Fatalf("RefreshTasks() want nil error, got %v", err)
+			}
+
+			// Only tasks this refresh found gone are counted, not ones gone before it or ones that came back
+			switch {
+			case tc.wantGone == nil && gotGone != nil:
+				t.Errorf("gone count = %d, want nil", *gotGone)
+			case tc.wantGone != nil && gotGone == nil:
+				t.Errorf("gone count = nil, want %d", *tc.wantGone)
+			case tc.wantGone != nil && *gotGone != *tc.wantGone:
+				t.Errorf("gone count = %d, want %d", *gotGone, *tc.wantGone)
 			}
 
 			rows := readCachedTasks(t, st)
@@ -460,7 +481,7 @@ func TestRefreshTasks_CacheState(t *testing.T) {
 				t.Fatalf("update cache_state failed: %v", err)
 			}
 
-			if err := st.RefreshTasks(t.Context(), tc.tasks, refreshNow, tc.full); err != nil {
+			if _, err := st.RefreshTasks(t.Context(), tc.tasks, refreshNow, tc.full); err != nil {
 				t.Fatalf("RefreshTasks() want nil error, got %v", err)
 			}
 
@@ -496,9 +517,13 @@ func TestRefreshTasks_FailureChangesNothing(t *testing.T) {
 		{ContextID: "11111111-1111-1111-1111-111111111111", PageID: "bad", Name: "Bad task", LastEditedTime: refreshNow},
 	}
 
-	err = st.RefreshTasks(t.Context(), tasks, refreshNow, true)
+	gone, err := st.RefreshTasks(t.Context(), tasks, refreshNow, true)
 	if err == nil {
 		t.Fatal("RefreshTasks() want error, got nil")
+	}
+	// Nothing was committed, so there's no count to report
+	if gone != nil {
+		t.Errorf("gone count = %d alongside an error, want nil", *gone)
 	}
 	var ce *clierr.Error
 	if !errors.As(err, &ce) {

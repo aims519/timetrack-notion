@@ -15,7 +15,7 @@ import (
 const (
 	BaseURL          = "https://api.notion.com/v1"
 	notionAPIVersion = "2026-03-11"
-	queryPageSize    = 20
+	queryPageSize    = 100
 )
 
 type Client struct {

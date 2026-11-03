@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -454,6 +455,80 @@ func TestQueryDataSource_SinceFilter(t *testing.T) {
 
 			if len(pages) != 2 {
 				t.Errorf("unexpected result count. Got %d, want 2", len(pages))
+			}
+		})
+	}
+}
+
+// When Notion can't be reached there's no HTTP status to map, so the error is offline (DESIGN.md §8)
+func TestQueryDataSource_Unreachable_ReturnsOffline(t *testing.T) {
+	const token = "secret-test-token"
+
+	tests := []struct {
+		name      string
+		newClient func(t *testing.T) *Client
+	}{
+		{
+			name: "server not listening",
+			newClient: func(t *testing.T) *Client {
+				// NewTestServer's in-memory network accepts every connection, even once the server is
+				// closed, so this case needs NewServer's real loopback listener to get a refusal
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("unexpected request to a closed server: %s %s", r.Method, r.URL.Path)
+				}))
+				nc := NewClient(s.URL, token, s.Client())
+
+				// Closing it straight away leaves a URL that refuses connections
+				s.Close()
+
+				return nc
+			},
+		},
+		{
+			name: "request times out",
+			newClient: func(t *testing.T) *Client {
+				// The handler never answers. Over the in-memory network it isn't told when the client
+				// gives up, so it waits to be released instead. Cleanups run last first, so release
+				// runs before the server's own cleanup, whose Close waits for the handler to return
+				release := make(chan struct{})
+				s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					<-release
+				}))
+				t.Cleanup(func() { close(release) })
+
+				httpClient := s.Client()
+				httpClient.Timeout = 50 * time.Millisecond
+
+				return NewClient(s.URL, token, httpClient)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nc := tc.newClient(t)
+
+			pages, err := nc.QueryDataSource(t.Context(), "1234", nil)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+
+			if len(pages) != 0 {
+				t.Errorf("expected no pages alongside an error, got %d", len(pages))
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != clierr.Offline {
+				t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+			}
+
+			// The cause is printed with the error, so it must never carry the token (DESIGN.md §9)
+			if strings.Contains(err.Error(), token) || (ce.Cause != nil && strings.Contains(ce.Cause.Error(), token)) {
+				t.Errorf("error includes the token: %v", err)
 			}
 		})
 	}

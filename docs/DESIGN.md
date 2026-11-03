@@ -457,7 +457,7 @@ Example, `tt status` before `init`:
 | 3 | Not found or ambiguous | `not_found`, `ambiguous_selector` |
 | 4 | State conflict | `timer_running`, `no_timer_running`, `sync_busy` |
 | 5 | Config, auth, local store, or not connected | `not_initialised`, `no_token`, `access_denied`, `database_too_new`, `database_unusable` |
-| 6 | Notion unreachable (`sync` only) | `offline` |
+| 6 | Notion unreachable (no response, or the request timed out) | `offline` |
 | 10 | Internal error (no stack traces) | `internal` |
 
 **`details`** is `null` except for:
@@ -465,7 +465,7 @@ Example, `tt status` before `init`:
 | Code | `details` |
 |---|---|
 | `timer_running` | `{"entry": <entry>}` |
-| `offline` | `{"synced": n, "pending": n}` |
+| `offline` | `{"synced": n, "pending": n}` from `sync`; `null` from other commands |
 | `ambiguous_selector` | `{"selector": "...", "candidates": [<task items>]}` |
 | `not_found` | `{"selector": "..."}` |
 | `invalid_time` | `{"input": "..."}` |

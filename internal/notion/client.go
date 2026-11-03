@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	notionBaseURL    = "https://api.notion.com/v1"
+	BaseURL          = "https://api.notion.com/v1"
 	notionAPIVersion = "2026-03-11"
 	queryPageSize    = 20
 )
@@ -122,7 +122,7 @@ func dataSourcePageRequest(ctx context.Context, url, startCursor, apiVersion, ap
 
 	res, err := client.Do(req)
 	if err != nil {
-		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+		return []Page{}, "", false, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
 	}
 	defer res.Body.Close()
 

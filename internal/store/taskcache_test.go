@@ -609,3 +609,109 @@ func checkCachedTask(t *testing.T, got cachedTask, want Task, wantTime string) {
 func ptr[T any](v T) *T {
 	return &v
 }
+
+func TestRecordTasksRefreshFailed(t *testing.T) {
+	refreshedAt := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
+	fullAt := time.Date(2026, 11, 2, 18, 30, 0, 0, time.UTC)
+	projectsAt := time.Date(2026, 11, 3, 7, 45, 0, 0, time.UTC)
+	plusOne := time.FixedZone("UTC+1", 60*60)
+
+	tests := []struct {
+		name        string
+		priorFailed *time.Time
+		now         time.Time
+		wantFailed  time.Time
+	}{
+		{
+			name:       "first failure",
+			now:        refreshNow,
+			wantFailed: refreshNow,
+		},
+		{
+			name:        "later failure replaces an earlier one",
+			priorFailed: &refreshEarlier,
+			now:         refreshNow,
+			wantFailed:  refreshNow,
+		},
+		// Edge cases
+		{
+			name:       "time not in UTC is stored in UTC",
+			now:        time.Date(2026, 11, 3, 10, 15, 0, 0, plusOne),
+			wantFailed: refreshNow,
+		},
+		{
+			name:       "nanoseconds kept",
+			now:        time.Date(2026, 11, 3, 9, 15, 1, 123456789, time.UTC),
+			wantFailed: time.Date(2026, 11, 3, 9, 15, 1, 123456789, time.UTC),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+			_, err := st.connectionPool.ExecContext(t.Context(), `
+				UPDATE cache_state
+				SET tasks_refreshed_at = ?,
+					tasks_refresh_failed_at = ?,
+					tasks_full_refreshed_at = ?,
+					projects_refreshed_at = ?
+				WHERE context_id = ?`,
+				ToDBString(refreshedAt), dbTimeOrNull(tc.priorFailed), ToDBString(fullAt), ToDBString(projectsAt), testContextID)
+			if err != nil {
+				t.Fatalf("update cache_state failed: %v", err)
+			}
+
+			if err := st.RecordTasksRefreshFailed(t.Context(), tc.now); err != nil {
+				t.Fatalf("RecordTasksRefreshFailed() want nil error, got %v", err)
+			}
+
+			// Reading back through CacheState also checks the time is stored in a format it can parse
+			got, err := st.CacheState(t.Context())
+			if err != nil {
+				t.Fatalf("CacheState() after RecordTasksRefreshFailed() want nil error, got %v", err)
+			}
+
+			checkTimePtr(t, "TasksRefreshFailedAt", got.TasksRefreshFailedAt, &tc.wantFailed)
+
+			// A failed refresh changes nothing else, so the next incremental refresh
+			// still starts from the last successful one
+			checkTimePtr(t, "TasksRefreshedAt", got.TasksRefreshedAt, &refreshedAt)
+			checkTimePtr(t, "TasksFullRefreshedAt", got.TasksFullRefreshedAt, &fullAt)
+			checkTimePtr(t, "ProjectsRefreshedAt", got.ProjectsRefreshedAt, &projectsAt)
+		})
+	}
+}
+
+func TestRecordTasksRefreshFailed_LeavesCachedTasks(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	_, err := st.connectionPool.ExecContext(t.Context(), `
+		INSERT INTO tasks(context_id, page_id, name, done, last_edited_time, gone_at)
+		VALUES (?, 'a', 'Present task', 0, ?, NULL),
+		       (?, 'b', 'Gone task', 0, ?, ?)`,
+		testContextID, ToDBString(refreshEarlier),
+		testContextID, ToDBString(refreshEarlier), ToDBString(refreshEarlier))
+	if err != nil {
+		t.Fatalf("insert tasks failed: %v", err)
+	}
+
+	if err := st.RecordTasksRefreshFailed(t.Context(), refreshNow); err != nil {
+		t.Fatalf("RecordTasksRefreshFailed() want nil error, got %v", err)
+	}
+
+	rows := readCachedTasks(t, st)
+	if len(rows) != 2 {
+		t.Fatalf("got %d cached tasks, want 2", len(rows))
+	}
+	if got := rows["a"].goneAt; got != nil {
+		t.Errorf("task a gone_at = %q, want NULL", *got)
+	}
+	want := ToDBString(refreshEarlier)
+	switch got := rows["b"].goneAt; {
+	case got == nil:
+		t.Errorf("task b gone_at = NULL, want %q", want)
+	case *got != want:
+		t.Errorf("task b gone_at = %q, want %q", *got, want)
+	}
+}

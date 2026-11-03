@@ -36,6 +36,9 @@ func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, 
 	// Fetch data sources since last refresh
 	pages, err := n.QueryDataSource(ctx, dataSourceID, sinceTime)
 	if err != nil {
+		// overall refresh timeout should not apply here since we always want this write to succeed
+		ctx = context.WithoutCancel(ctx)
+		_ = s.RecordTasksRefreshFailed(ctx, nowUTC)
 		return err
 	}
 

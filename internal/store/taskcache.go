@@ -154,3 +154,18 @@ func (s *Store) RefreshTasks(ctx context.Context, tasks []Task, nowUTC time.Time
 
 	return nil
 }
+
+// RecordTasksRefreshFailed updates the cache_state.tasks_refresh_failed_at value with the current time,
+// to be used for retry backoff in calls to Notion
+func (s *Store) RecordTasksRefreshFailed(ctx context.Context, nowUTC time.Time) error {
+	_, err := s.connectionPool.ExecContext(ctx, `
+		UPDATE cache_state
+		SET tasks_refresh_failed_at = ?
+		WHERE context_id = ?
+	`, ToDBString(nowUTC), DefaultContextID)
+	if err != nil {
+		return &clierr.Error{Code: clierr.Internal, Message: "error updating cache_state row", Cause: err}
+	}
+
+	return nil
+}

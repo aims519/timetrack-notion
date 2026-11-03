@@ -35,7 +35,7 @@ func (s *Store) CacheState(ctx context.Context) (CacheState, error) {
 			projects_refreshed_at
 			FROM cache_state
 			WHERE context_id = ?
-		`, defaultContextID).Scan(&result.ContextID, &tasksRefreshedAtStr, &tasksRefreshFailedAtStr, &tasksFullRefreshedAtStr, &projectsRefreshedAtStr)
+		`, DefaultContextID).Scan(&result.ContextID, &tasksRefreshedAtStr, &tasksRefreshFailedAtStr, &tasksFullRefreshedAtStr, &projectsRefreshedAtStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CacheState{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "no cache_state found", Details: map[string]any{"path": s.dbPath}}
 	}
@@ -79,4 +79,78 @@ type Task struct {
 	Done           bool
 	LastEditedTime time.Time
 	GoneAt         *time.Time
+}
+
+func (s *Store) RefreshTasks(ctx context.Context, tasks []Task, nowUTC time.Time, fullRefresh bool) error {
+	tx, err := s.connectionPool.BeginTx(ctx, nil)
+	if err != nil {
+		return &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	upsertTaskStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO tasks(context_id, page_id, name, project_page_id, sort_order, done, last_edited_time)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(context_id, page_id)
+		DO
+			UPDATE SET name = excluded.name,
+			project_page_id = excluded.project_page_id,
+			sort_order = excluded.sort_order,
+			done = excluded.done,
+			last_edited_time = excluded.last_edited_time,
+			gone_at = NULL
+	`)
+	if err != nil {
+		return &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't prepare statement", Cause: err, Details: map[string]any{"path": s.dbPath}}
+	}
+	defer func() { _ = upsertTaskStmt.Close() }()
+
+	// All existing tasks are updated with gone_at = now and tasks that still exist in Notion reset
+	// this back to NULL. Tasks that aren't reset are correctly marked as gone
+	if fullRefresh {
+		_, err := tx.ExecContext(ctx, `
+		UPDATE tasks
+		SET gone_at = ?
+		WHERE context_id = ?
+		AND gone_at IS NULL
+	`, ToDBString(nowUTC), DefaultContextID)
+		if err != nil {
+			return &clierr.Error{Code: clierr.Internal, Message: "error updating cached task", Cause: err}
+		}
+	}
+
+	for _, t := range tasks {
+		_, err = upsertTaskStmt.ExecContext(ctx, t.ContextID, t.PageID, t.Name, t.ProjectPageID, t.SortOrder, t.Done, ToDBString(t.LastEditedTime))
+		if err != nil {
+			return &clierr.Error{Code: clierr.Internal, Message: "error writing cached task", Cause: err}
+		}
+	}
+
+	// Update cache_state
+	_, err = tx.ExecContext(ctx, `
+		UPDATE cache_state
+		SET tasks_refreshed_at = ?
+		WHERE context_id = ?
+	`, ToDBString(nowUTC), DefaultContextID)
+	if err != nil {
+		return &clierr.Error{Code: clierr.Internal, Message: "error updating cache_state row", Cause: err}
+	}
+
+	if fullRefresh {
+		_, err = tx.ExecContext(ctx, `
+		UPDATE cache_state
+		SET tasks_full_refreshed_at = ?
+		WHERE context_id = ?
+	`, ToDBString(nowUTC), DefaultContextID)
+		if err != nil {
+			return &clierr.Error{Code: clierr.Internal, Message: "error updating cache_state row", Cause: err}
+		}
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return &clierr.Error{Code: clierr.Internal, Message: "error committing transaction", Cause: err}
+	}
+
+	return nil
 }

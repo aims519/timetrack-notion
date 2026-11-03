@@ -101,7 +101,7 @@ func insertNewEntry(ctx context.Context, tx *sql.Tx, nowUTC, startUTC time.Time,
 	? AS description,
 	? AS updated_at
 	FROM contexts WHERE id = ?;
-	`, newID, startUTCFormatted, description, updatedAtUTCFormatted, defaultContextID)
+	`, newID, startUTCFormatted, description, updatedAtUTCFormatted, DefaultContextID)
 	if err != nil {
 		return uuid.Nil, &clierr.Error{Code: clierr.Internal, Message: "error writing new entry", Cause: err}
 	}

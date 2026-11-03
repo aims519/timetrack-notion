@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const defaultContextID = "00000000-0000-0000-0000-000000000000"
+const DefaultContextID = "00000000-0000-0000-0000-000000000000"
 
 func tryStopRunningEntry(ctx context.Context, tx *sql.Tx, endUTC, nowUTC time.Time, dbPath string) (uuid.UUID, error) {
 	runningEntryID, runningEntryStart, found, err := findRunningEntry(ctx, tx, dbPath)

@@ -26,24 +26,34 @@ func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, 
 		return err
 	}
 
-	sinceTime := cacheState.TasksRefreshedAt
-	if cacheState.TasksRefreshedAt != nil {
-		adjusted := sinceTime.Add(-taskRefreshOverlapMinutes * time.Minute)
+	nowUTC := c.NowUTC()
+	var sinceTime *time.Time
+	if cacheState.TasksRefreshedAt != nil && !full {
+		adjusted := cacheState.TasksRefreshedAt.Add(-taskRefreshOverlapMinutes * time.Minute)
 		sinceTime = &adjusted
 	}
 
 	// Fetch data sources since last refresh
-	_, err = n.QueryDataSource(ctx, dataSourceID, sinceTime)
+	pages, err := n.QueryDataSource(ctx, dataSourceID, sinceTime)
 	if err != nil {
 		return err
 	}
 
+	tasks := make([]store.Task, len(pages))
+	for i, p := range pages {
+		tasks[i] = mapPageToTask(p, store.DefaultContextID)
+	}
+
 	// Sync to DB, map pages to Tasks
+	err = s.RefreshTasks(ctx, tasks, nowUTC, full)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func mapPageToTask(p notion.Page, contextID string) *store.Task {
+func mapPageToTask(p notion.Page, contextID string) store.Task {
 	var name string
 	if prop, ok := p.Properties["Task"]; ok && prop.Type == "title" {
 		var sb strings.Builder
@@ -71,7 +81,7 @@ func mapPageToTask(p notion.Page, contextID string) *store.Task {
 		done = prop.Checkbox
 	}
 
-	return &store.Task{
+	return store.Task{
 		ContextID:      contextID,
 		PageID:         store.SanitiseID(p.ID),
 		Name:           name,

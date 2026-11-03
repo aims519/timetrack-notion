@@ -100,9 +100,6 @@ func TestMapPageToTask(t *testing.T) {
 			}`)
 
 			got := mapPageToTask(p, testContextID)
-			if got == nil {
-				t.Fatal("mapPageToTask() returned nil")
-			}
 
 			if got.ContextID != testContextID {
 				t.Errorf("ContextID = %q, want %q", got.ContextID, testContextID)
@@ -210,9 +207,6 @@ func TestMapPageToTask_OrderAndDone(t *testing.T) {
 			}`)
 
 			got := mapPageToTask(p, testContextID)
-			if got == nil {
-				t.Fatal("mapPageToTask() returned nil")
-			}
 
 			switch {
 			case tc.wantOrder == nil && got.SortOrder != nil:
@@ -242,9 +236,6 @@ func TestMapPageToTask_Times(t *testing.T) {
 	}`)
 
 	got := mapPageToTask(p, testContextID)
-	if got == nil {
-		t.Fatal("mapPageToTask() returned nil")
-	}
 
 	wantEdited := time.Date(2026, 11, 2, 9, 15, 0, 0, time.UTC)
 	if !got.LastEditedTime.Equal(wantEdited) {

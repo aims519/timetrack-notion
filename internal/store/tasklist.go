@@ -27,13 +27,17 @@ func (s *Store) ListTasks(ctx context.Context, limit int, all bool) (tasks []Tas
 		tasks.page_id,
 		tasks.name,
 		project_page_id,
+		projects.name,
 		sort_order,
 		done
 		FROM tasks
 		JOIN contexts ON tasks.context_id = contexts.id
 		LEFT JOIN projects ON tasks.project_page_id = projects.page_id
 			AND projects.context_id = tasks.context_id
-		WHERE contexts.id = ? AND (? OR tasks.done = 0) AND tasks.gone_at IS NULL
+			AND projects.gone_at IS NULL
+		WHERE contexts.id = ?
+		AND (? OR tasks.done = 0)
+		AND tasks.gone_at IS NULL
 		ORDER BY sort_order NULLS LAST, tasks.name COLLATE NOCASE
 		LIMIT ?
 	`, DefaultContextID, all, queryLimit)
@@ -64,7 +68,7 @@ func (s *Store) ListTasks(ctx context.Context, limit int, all bool) (tasks []Tas
 
 func scanTask(s scanner) (Task, error) {
 	var t Task
-	err := s.Scan(&t.ContextID, &t.PageID, &t.Name, &t.ProjectPageID, &t.SortOrder, &t.Done)
+	err := s.Scan(&t.ContextID, &t.PageID, &t.Name, &t.ProjectPageID, &t.ProjectName, &t.SortOrder, &t.Done)
 
 	return t, err
 }

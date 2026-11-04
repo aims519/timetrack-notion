@@ -126,10 +126,19 @@ func mapDbTasks(inputs []store.Task, shortIDMap map[string]string, truncated boo
 			shortID = obj.PageID
 		}
 
+		var projectRef *output.ProjectRef
+		if obj.ProjectPageID != nil && obj.ProjectName != nil {
+			projectRef = &output.ProjectRef{
+				PageID: *obj.ProjectPageID,
+				Name:   *obj.ProjectName,
+			}
+		}
+
 		tasks[i] = output.TaskItem{
 			PageID:  obj.PageID,
 			ShortID: shortID,
 			Name:    obj.Name,
+			Project: projectRef,
 			Order:   obj.SortOrder,
 			Done:    obj.Done,
 		}

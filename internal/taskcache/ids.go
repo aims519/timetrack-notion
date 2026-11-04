@@ -48,7 +48,7 @@ func ShortIDs(all []string) (map[string]string, error) {
 // suffix returns the last l characters of a string
 func suffix(s string, l int) (string, error) {
 	if l > len(s) {
-		return "", &clierr.Error{Code: clierr.Internal, Message: fmt.Sprintf("invalid suffix length provided, %d, for string length %d", l, len(s))}
+		return "", &clierr.Error{Code: clierr.Internal, Message: fmt.Sprintf("one id is the suffix of another: %s", s)}
 	}
 
 	res := s[len(s)-l:]

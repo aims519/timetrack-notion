@@ -325,3 +325,59 @@ func TestRunningEntryWarnings(t *testing.T) {
 		})
 	}
 }
+
+func TestMapDbTasks(t *testing.T) {
+	order := 4.1
+	inputs := []store.Task{
+		{ContextID: "ctx", PageID: "3f63b23e837922", Name: "Write the sync engine", SortOrder: &order, ProjectPageID: ptr("project1")},
+		{ContextID: "ctx", PageID: "4a74c34fa1b2c3", Name: "Plan", Done: true},
+		{ContextID: "ctx", PageID: "5b85d45fnotmapped", Name: "Missing from the map"},
+	}
+	shortIDs := map[string]string{
+		"3f63b23e837922": "837922",
+		"4a74c34fa1b2c3": "a1b2c3",
+	}
+
+	doc := mapDbTasks(inputs, shortIDs, false)
+
+	// The tasks keep the order they came from the store in
+	want := []output.TaskItem{
+		{PageID: "3f63b23e837922", ShortID: "837922", Order: &order, Name: "Write the sync engine"},
+		{PageID: "4a74c34fa1b2c3", ShortID: "a1b2c3", Name: "Plan", Done: true},
+		// A page ID with no short ID falls back to the full page ID
+		{PageID: "5b85d45fnotmapped", ShortID: "5b85d45fnotmapped", Name: "Missing from the map"},
+	}
+	if !reflect.DeepEqual(doc.Tasks, want) {
+		t.Errorf("Tasks = %+v, want %+v", doc.Tasks, want)
+	}
+
+	if doc.SchemaVersion != output.SchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", doc.SchemaVersion, output.SchemaVersion)
+	}
+	if doc.Warnings == nil {
+		t.Error("Warnings = nil, want an empty slice")
+	}
+}
+
+func TestMapDbTasks_Truncated(t *testing.T) {
+	inputs := []store.Task{{PageID: "3f63b23e837922", Name: "Write the sync engine"}}
+
+	for _, truncated := range []bool{false, true} {
+		doc := mapDbTasks(inputs, map[string]string{}, truncated)
+
+		if doc.Truncated != truncated {
+			t.Errorf("mapDbTasks(truncated=%v) Truncated = %v", truncated, doc.Truncated)
+		}
+	}
+}
+
+func TestMapDbTasks_NoTasks(t *testing.T) {
+	for _, inputs := range [][]store.Task{nil, {}} {
+		doc := mapDbTasks(inputs, map[string]string{}, false)
+
+		// tasks is always an array in JSON, so never nil (DESIGN.md §8)
+		if doc.Tasks == nil || len(doc.Tasks) != 0 {
+			t.Errorf("mapDbTasks(%v) Tasks = %v, want an empty slice", inputs, doc.Tasks)
+		}
+	}
+}

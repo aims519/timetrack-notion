@@ -333,8 +333,8 @@ Table output is for people and may change. **JSON output (`--output json`) is th
 - Timestamps are RFC 3339 UTC; durations are integer seconds, rounded to the nearest second (half away from zero).
 - A plural key holds an array (`entries`, `tasks`); a singular key holds one object. Collections are always wrapped in an object, never a bare array.
 - `warnings` is an array in every success document, `[]` when empty. Each warning is `{"code", "message", "details"}`; codes are `overlap` (`details.entry_ids`), `stale_timer` and `task_cache_stale`.
-- `list` and `task list` accept `--limit N` and include `truncated`: `true` when more rows matched than were returned, so a script knows it isn't seeing everything. Totals still cover every matching row: `list`'s `total_minutes` is the same with or without `--limit`.
-- Order is part of the contract: `list` chronological; `task list` by Order, then name, unordered last.
+- `list` and `task list` accept `--limit N` and include `truncated`: `true` when more rows matched than were returned, so a script knows it isn't seeing everything. Without `--limit`, every matching row is returned; `N` must be at least 1, else `usage`. Totals still cover every matching row: `list`'s `total_minutes` is the same with or without `--limit`.
+- Order is part of the contract: `list` chronological; `task list` by Order, then name (ignoring case), unordered last.
 
 ### Entry object
 

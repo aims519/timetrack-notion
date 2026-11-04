@@ -24,6 +24,7 @@ func newTaskCmd(a *app) *cobra.Command {
 	}
 
 	taskCmd.AddCommand(newRefreshCmd(a))
+	taskCmd.AddCommand(newListCmd(a))
 
 	return taskCmd
 }
@@ -97,4 +98,53 @@ func executeRefreshUpdates(ctx context.Context, a *app, clock *refreshClock, nc 
 		res.GoneCount, nil)
 
 	return doc, nil
+}
+
+func newListCmd(a *app) *cobra.Command {
+	var limit int
+	var all = false
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "list details of cached Notion tasks",
+		Long:  "",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// No args expected
+			if len(args) > 0 {
+				return &clierr.Error{Code: clierr.Usage, Message: fmt.Sprintf("unknown argument received: %q", args[0])}
+			}
+
+			if cmd.Flag("limit").Changed && limit < 1 {
+				return &clierr.Error{Code: clierr.Usage, Message: "--limit must be at least 1 when provided"}
+			}
+
+			loc, err := timeparse.CurrentLocation()
+			if err != nil {
+				return err
+			}
+
+			// Fetch tasks, set limit to -1 if none provided
+			tasks, truncated, err := a.db.ListTasks(cmd.Context(), limit, all)
+			if err != nil {
+				return err
+			}
+
+			// Fetch short ID mappings for all tasks
+			allIDs, err := a.db.AllTaskIDs(cmd.Context())
+			if err != nil {
+				return err
+			}
+			shortIDMap, err := taskcache.ShortIDs(allIDs)
+			if err != nil {
+				return err
+			}
+
+			doc := mapDbTasks(tasks, shortIDMap, truncated)
+			return output.Write(cmd.OutOrStdout(), cmd.ErrOrStderr(), *a.format, doc, loc)
+		},
+	}
+
+	listCmd.Flags().BoolVar(&all, "all", all, "include 'done' tasks in results")
+	listCmd.Flags().IntVar(&limit, "limit", store.NoLimit, "optionally limit the number of results")
+
+	return listCmd
 }

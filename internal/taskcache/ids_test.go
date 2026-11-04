@@ -137,6 +137,12 @@ func TestShortIDs_Errors(t *testing.T) {
 		{"5_characters", []string{"abcde"}},
 		{"empty_string", []string{""}},
 		{"short_id_after_valid_ids", []string{"abcdefgh", "1234567890", "12345"}},
+		// Every suffix of the shorter ID is also a suffix of the longer one, so the shorter
+		// one has no unique short ID. Both orders, since the shorter one is found from either side
+		{"suffix_of_another_6_characters", []string{"abcdef", "xabcdef"}},
+		{"suffix_of_another_6_characters_reversed", []string{"xabcdef", "abcdef"}},
+		{"suffix_of_another_longer", []string{"abcdefghij", "zzzabcdefghij"}},
+		{"suffix_of_another_among_unique", []string{"1234567890", "abcdefghij", "zzzabcdefghij"}},
 	}
 
 	for _, tc := range tests {

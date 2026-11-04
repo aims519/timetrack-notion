@@ -391,3 +391,149 @@ func TestAllTaskIDs(t *testing.T) {
 		})
 	}
 }
+
+// listProject is a row written straight to the projects table, so tests can set gone_at
+// and use a second context
+type listProject struct {
+	contextID string
+	pageID    string
+	name      string
+	gone      bool
+}
+
+func insertListProjects(t *testing.T, st *Store, projects []listProject) {
+	t.Helper()
+
+	for _, p := range projects {
+		contextID := p.contextID
+		if contextID == "" {
+			contextID = testContextID
+		}
+
+		var goneAt any
+		if p.gone {
+			goneAt = "2026-11-03T09:00:00Z"
+		}
+
+		_, err := st.connectionPool.ExecContext(t.Context(), `
+			INSERT INTO projects(context_id, page_id, name, gone_at)
+			VALUES (?, ?, ?, ?)`,
+			contextID, p.pageID, p.name, goneAt)
+		if err != nil {
+			t.Fatalf("insert project %q failed: %v", p.pageID, err)
+		}
+	}
+}
+
+func TestListTasks_Project(t *testing.T) {
+	tests := []struct {
+		name        string
+		project     *string // the task's project_page_id
+		projects    []listProject
+		wantProject *string // ProjectPageID; nil means none
+		wantName    *string // ProjectName; nil means none
+	}{
+		{
+			name:        "cached project",
+			project:     ptr("project1"),
+			projects:    []listProject{{pageID: "project1", name: "Sabbatical"}},
+			wantProject: ptr("project1"),
+			wantName:    ptr("Sabbatical"),
+		},
+		{
+			name:        "no project",
+			project:     nil,
+			projects:    []listProject{{pageID: "project1", name: "Sabbatical"}},
+			wantProject: nil,
+			wantName:    nil,
+		},
+		{
+			// A task can be refreshed before its project is
+			name:        "project not cached",
+			project:     ptr("project1"),
+			projects:    nil,
+			wantProject: ptr("project1"),
+			wantName:    nil,
+		},
+		{
+			name:    "the task's project is picked from several",
+			project: ptr("project2"),
+			projects: []listProject{
+				{pageID: "project1", name: "Sabbatical"},
+				{pageID: "project2", name: "Tracker"},
+			},
+			wantProject: ptr("project2"),
+			wantName:    ptr("Tracker"),
+		},
+		// Edge cases
+		{
+			// The task is still listed; only the gone project's name is left out
+			name:        "project gone",
+			project:     ptr("project1"),
+			projects:    []listProject{{pageID: "project1", name: "Sabbatical", gone: true}},
+			wantProject: ptr("project1"),
+			wantName:    nil,
+		},
+		{
+			name:        "project with the same ID in another context isn't used",
+			project:     ptr("project1"),
+			projects:    []listProject{{contextID: otherContextID, pageID: "project1", name: "Other context"}},
+			wantProject: ptr("project1"),
+			wantName:    nil,
+		},
+		{
+			// An untitled project is still a project, so its name is "" rather than none
+			name:        "untitled project",
+			project:     ptr("project1"),
+			projects:    []listProject{{pageID: "project1", name: ""}},
+			wantProject: ptr("project1"),
+			wantName:    ptr(""),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertOtherContext(t, st)
+			insertListProjects(t, st, tc.projects)
+			insertListTasks(t, st, []listTask{{pageID: "task1", name: "Write tests", project: tc.project}})
+
+			got, _, err := st.ListTasks(t.Context(), NoLimit, false)
+			if err != nil {
+				t.Fatalf("ListTasks() want nil error, got %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("ListTasks() returned %d tasks, want 1: %v", len(got), got)
+			}
+
+			checkStringPtr(t, "ProjectPageID", got[0].ProjectPageID, tc.wantProject)
+			checkStringPtr(t, "ProjectName", got[0].ProjectName, tc.wantName)
+		})
+	}
+}
+
+// A gone project mustn't drop its tasks from the list, or change what --limit counts
+func TestListTasks_GoneProjectKeepsTasks(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	insertListProjects(t, st, []listProject{
+		{pageID: "kept", name: "Kept"},
+		{pageID: "gone", name: "Gone", gone: true},
+	})
+	insertListTasks(t, st, []listTask{
+		{pageID: "a", name: "In kept project", project: ptr("kept"), order: ptr(1.0)},
+		{pageID: "b", name: "In gone project", project: ptr("gone"), order: ptr(2.0)},
+		{pageID: "c", name: "No project", order: ptr(3.0)},
+	})
+
+	got, truncated, err := st.ListTasks(t.Context(), 2, false)
+	if err != nil {
+		t.Fatalf("ListTasks() want nil error, got %v", err)
+	}
+
+	if ids, want := listedPageIDs(got), []string{"a", "b"}; !slices.Equal(ids, want) {
+		t.Errorf("page IDs = %v, want %v", ids, want)
+	}
+	if !truncated {
+		t.Error("truncated = false, want true: a third task matched")
+	}
+}

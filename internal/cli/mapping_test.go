@@ -381,3 +381,51 @@ func TestMapDbTasks_NoTasks(t *testing.T) {
 		}
 	}
 }
+
+func TestMapDbTasks_Project(t *testing.T) {
+	tests := []struct {
+		name          string
+		projectPageID *string
+		projectName   *string
+		want          *output.ProjectRef
+	}{
+		{
+			name:          "cached project",
+			projectPageID: ptr("project1"),
+			projectName:   ptr("Sabbatical"),
+			want:          &output.ProjectRef{PageID: "project1", Name: "Sabbatical"},
+		},
+		{
+			name: "no project",
+			want: nil,
+		},
+		{
+			// The store gives no name when the project isn't cached or is gone
+			name:          "project without a name",
+			projectPageID: ptr("project1"),
+			want:          nil,
+		},
+		// Edge cases
+		{
+			name:          "untitled project",
+			projectPageID: ptr("project1"),
+			projectName:   ptr(""),
+			want:          &output.ProjectRef{PageID: "project1", Name: ""},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := []store.Task{{PageID: "3f63b23e837922", Name: "Write tests", ProjectPageID: tc.projectPageID, ProjectName: tc.projectName}}
+
+			doc := mapDbTasks(inputs, map[string]string{}, false)
+
+			if len(doc.Tasks) != 1 {
+				t.Fatalf("got %d tasks, want 1", len(doc.Tasks))
+			}
+			if got := doc.Tasks[0].Project; !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Project = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

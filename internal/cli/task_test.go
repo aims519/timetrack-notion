@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -333,6 +334,116 @@ func TestRun_TaskList_Errors(t *testing.T) {
 			}
 			if doc.Error.Code != string(tc.wantCode) {
 				t.Errorf("error code want %q, got %q", tc.wantCode, doc.Error.Code)
+			}
+		})
+	}
+}
+
+// The project in each task item is part of the JSON contract (DESIGN.md §8): the project's
+// page ID and name when it's cached, and null otherwise
+func TestRun_TaskList_Project(t *testing.T) {
+	const (
+		inKeptID        = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+		inGoneID        = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2"
+		notCachedID     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3"
+		noProjectID     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4"
+		keptProject     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1"
+		goneProject     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+		uncachedProject = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb3"
+	)
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	t.Setenv("TT_DB", dbPath)
+
+	st, err := store.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open(%q): %v", dbPath, err)
+	}
+	refreshed := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
+	kept := store.Project{ContextID: store.DefaultContextID, PageID: keptProject, Name: "Time tracker"}
+	gone := store.Project{ContextID: store.DefaultContextID, PageID: goneProject, Name: "Deleted project"}
+	task := func(id string, project *string, order float64) store.Task {
+		return store.Task{ContextID: store.DefaultContextID, PageID: id, Name: "Task " + id[len(id)-1:], ProjectPageID: project, SortOrder: ptr(order), LastEditedTime: refreshed}
+	}
+
+	// The second projects refresh leaves out the gone project, so it's marked gone
+	_, err = st.RefreshProjects(context.Background(), []store.Project{kept, gone}, refreshed)
+	if err == nil {
+		_, err = st.RefreshProjects(context.Background(), []store.Project{kept}, refreshed.Add(time.Hour))
+	}
+	if err == nil {
+		_, err = st.RefreshTasks(context.Background(), []store.Task{
+			task(inKeptID, ptr(keptProject), 1),
+			task(inGoneID, ptr(goneProject), 2),
+			task(notCachedID, ptr(uncachedProject), 3),
+			task(noProjectID, nil, 4),
+		}, refreshed, true)
+	}
+	_ = st.Close()
+	if err != nil {
+		t.Fatalf("seeding the cache: %v", err)
+	}
+
+	code, stdout, stderr := runTT(t, "task", "list")
+	if code != 0 {
+		t.Fatalf("Run() = %d, want 0 (stderr: %q)", code, stderr)
+	}
+
+	// Decoded as raw JSON per field, so a missing "project" key isn't mistaken for null
+	var got struct {
+		Tasks []map[string]json.RawMessage `json:"tasks"`
+	}
+	if err := json.Unmarshal(stdout, &got); err != nil {
+		t.Fatalf("unable to decode task list document %q: %v", stdout, err)
+	}
+
+	gotProjects := map[string]json.RawMessage{}
+	for _, item := range got.Tasks {
+		var pageID string
+		if err := json.Unmarshal(item["page_id"], &pageID); err != nil {
+			t.Fatalf("decoding page_id %q: %v", item["page_id"], err)
+		}
+		project, ok := item["project"]
+		if !ok {
+			t.Errorf("task %s has no project key, want one, even if null", pageID)
+			continue
+		}
+		gotProjects[pageID] = project
+	}
+
+	tests := []struct {
+		name   string
+		pageID string
+		want   string // the task's "project" value as JSON
+	}{
+		{"cached project", inKeptID, `{"page_id":"` + keptProject + `","name":"Time tracker"}`},
+		// The task is still listed, without the deleted project's name
+		{"project gone", inGoneID, `null`},
+		{"project not cached", notCachedID, `null`},
+		{"no project", noProjectID, `null`},
+	}
+
+	if len(got.Tasks) != len(tests) {
+		t.Errorf("got %d tasks, want %d", len(got.Tasks), len(tests))
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, ok := gotProjects[tc.pageID]
+			if !ok {
+				t.Fatalf("task %s not listed", tc.pageID)
+			}
+
+			// Compared as decoded values, so spacing and key order in the output don't matter
+			var gotValue, wantValue any
+			if err := json.Unmarshal(raw, &gotValue); err != nil {
+				t.Fatalf("decoding project %q: %v", raw, err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &wantValue); err != nil {
+				t.Fatalf("decoding want %q: %v", tc.want, err)
+			}
+			if !reflect.DeepEqual(gotValue, wantValue) {
+				t.Errorf("project = %s, want %s", raw, tc.want)
 			}
 		})
 	}

@@ -75,6 +75,7 @@ type Task struct {
 	PageID         string
 	Name           string
 	ProjectPageID  *string
+	ProjectName    *string
 	SortOrder      *float64
 	Done           bool
 	LastEditedTime time.Time

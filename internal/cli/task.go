@@ -122,7 +122,7 @@ func newListCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			// Fetch tasks, set limit to -1 if none provided
+			// Fetch tasks
 			tasks, truncated, err := a.db.ListTasks(cmd.Context(), limit, all)
 			if err != nil {
 				return err

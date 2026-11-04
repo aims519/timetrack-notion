@@ -26,29 +26,46 @@ func (fc fakeClock) NowUTC() time.Time {
 
 var _ notionPageFetcher = (*fakeNotionFetcher)(nil)
 
+// Data source IDs passed to Refresh. The fake fetcher answers testProjectsDataSourceID with
+// projectPages, and any other data source with pages
+const (
+	testTasksDataSourceID    = "1234"
+	testProjectsDataSourceID = "5678"
+)
+
+// fakeNotionFetcher records the tasks query and the projects query separately, so a test can
+// check each one whichever order Refresh makes them in
 type fakeNotionFetcher struct {
-	pages               []notion.Page
-	sinceFilterUsed     *time.Time
-	invokedTimes        int
-	dataSourceIDQueried string
-	err                 error
+	pages               []notion.Page // returned for the tasks data source
+	sinceFilterUsed     *time.Time    // since of the last tasks query
+	invokedTimes        int           // tasks queries
+	dataSourceIDQueried string        // data source of the last tasks query
+
+	projectPages         []notion.Page // returned for the projects data source
+	projectsSinceUsed    *time.Time    // since of the last projects query
+	projectsQueriedTimes int
+
+	err error // returned from every query
 }
 
 func (fetcher *fakeNotionFetcher) QueryDataSource(ctx context.Context, dataSourceID string, since *time.Time) ([]notion.Page, error) {
+	var recordedSince *time.Time
 	if since != nil {
-		recordedSince := *since
-		fetcher.sinceFilterUsed = &recordedSince
-	} else {
-		fetcher.sinceFilterUsed = nil
+		s := *since
+		recordedSince = &s
 	}
+
+	if dataSourceID == testProjectsDataSourceID {
+		fetcher.projectsSinceUsed = recordedSince
+		fetcher.projectsQueriedTimes++
+		return fetcher.projectPages, fetcher.err
+	}
+
+	fetcher.sinceFilterUsed = recordedSince
 	fetcher.invokedTimes++
 	fetcher.dataSourceIDQueried = dataSourceID
 
-	if fetcher.err != nil {
-		return fetcher.pages, fetcher.err
-	}
-
-	return fetcher.pages, nil
+	return fetcher.pages, fetcher.err
 }
 
 func openTestStore(t *testing.T) *store.Store {
@@ -76,10 +93,9 @@ func openTestStore(t *testing.T) *store.Store {
 func TestRefresh_IncrementalRefreshFetcherError(t *testing.T) {
 	c := fakeClock{nowUTC: time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)}
 	st := openTestStore(t)
-	testDataSourceID := "1234"
 	fetcher := fakeNotionFetcher{pages: []notion.Page{}, err: &clierr.Error{Code: clierr.Offline, Message: "notion unreachable"}}
 
-	_, err := Refresh(t.Context(), c, st, &fetcher, testDataSourceID, false)
+	_, err := Refresh(t.Context(), c, st, &fetcher, testTasksDataSourceID, testProjectsDataSourceID, false)
 	if err == nil {
 		t.Fatalf("Refresh() error = nil, want clierr.Error")
 	}
@@ -112,14 +128,13 @@ func TestRefresh_FirstIncrementalRefresh(t *testing.T) {
 	// on first call, no since time should be sent
 	c := fakeClock{nowUTC: time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)}
 	st := openTestStore(t)
-	testDataSourceID := "1234"
 
 	pages := make([]notion.Page, 2)
 	pages[0] = notion.Page{ID: "page-1", LastEditedTimeUTC: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)}
 	pages[1] = notion.Page{ID: "page-2", LastEditedTimeUTC: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}
 	fetcher := fakeNotionFetcher{pages: pages}
 
-	res, err := Refresh(t.Context(), c, st, &fetcher, testDataSourceID, false)
+	res, err := Refresh(t.Context(), c, st, &fetcher, testTasksDataSourceID, testProjectsDataSourceID, false)
 	if err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
@@ -128,8 +143,12 @@ func TestRefresh_FirstIncrementalRefresh(t *testing.T) {
 		t.Errorf("fetcher invoked %d times, want 1", fetcher.invokedTimes)
 	}
 
-	if fetcher.dataSourceIDQueried != testDataSourceID {
-		t.Errorf("data source %q queried, want %q", fetcher.dataSourceIDQueried, testDataSourceID)
+	if fetcher.projectsQueriedTimes != 1 {
+		t.Errorf("projects data source queried %d times, want 1", fetcher.projectsQueriedTimes)
+	}
+
+	if fetcher.dataSourceIDQueried != testTasksDataSourceID {
+		t.Errorf("data source %q queried, want %q", fetcher.dataSourceIDQueried, testTasksDataSourceID)
 	}
 
 	if !res.RefreshedAt.Equal(c.nowUTC) {
@@ -409,6 +428,124 @@ func TestMapPageToTask_Times(t *testing.T) {
 	}
 }
 
+func TestMapPageToProject(t *testing.T) {
+	const (
+		pageID     = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		wantPageID = "aaaaaaaabbbbccccddddeeeeeeeeeeee"
+	)
+
+	tests := []struct {
+		name       string
+		properties string // the JSON inside "properties": {...}
+		wantName   string
+	}{
+		{
+			name:       "title in one piece",
+			properties: `"Project name": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": "Sabbatical"}]}`,
+			wantName:   "Sabbatical",
+		},
+		{
+			name: "title in several pieces is joined",
+			properties: `"Project name": {"id": "title", "type": "title", "title": [
+				{"type": "text", "plain_text": "Time "},
+				{"type": "text", "plain_text": "tracker", "annotations": {"bold": true}},
+				{"type": "text", "plain_text": " CLI"}
+			]}`,
+			wantName: "Time tracker CLI",
+		},
+		{
+			name: "other properties are ignored",
+			properties: `"Project name": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": "Sabbatical"}]},
+				"Status": {"id": "s1", "type": "status", "status": {"name": "Active"}}`,
+			wantName: "Sabbatical",
+		},
+		// Edge cases
+		{
+			name:       "untitled project",
+			properties: `"Project name": {"id": "title", "type": "title", "title": []}`,
+			wantName:   "",
+		},
+		{
+			name:       "title property missing",
+			properties: `"Status": {"id": "s1", "type": "status", "status": {"name": "Active"}}`,
+			wantName:   "",
+		},
+		{
+			name:       "title property has the wrong type",
+			properties: `"Project name": {"id": "n1", "type": "rich_text", "rich_text": [{"type": "text", "plain_text": "Not a title"}]}`,
+			wantName:   "",
+		},
+		{
+			// A task's title property is named differently, so a project page doesn't take its name from it
+			name:       "task title property name isn't used",
+			properties: `"Task": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": "Not a project"}]}`,
+			wantName:   "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := decodePage(t, `{
+				"object": "page",
+				"id": "`+pageID+`",
+				"created_time": "2026-11-02T09:00:00.000Z",
+				"last_edited_time": "2026-11-02T09:00:00.000Z",
+				"in_trash": false,
+				"properties": {`+tc.properties+`}
+			}`)
+
+			got := mapPageToProject(p, testContextID)
+
+			if got.ContextID != testContextID {
+				t.Errorf("ContextID = %q, want %q", got.ContextID, testContextID)
+			}
+			// Tasks store their project's ID without dashes, so the project's ID must match it
+			// for task list to find the project
+			if got.PageID != wantPageID {
+				t.Errorf("PageID = %q, want %q (no dashes)", got.PageID, wantPageID)
+			}
+			if got.Name != tc.wantName {
+				t.Errorf("Name = %q, want %q", got.Name, tc.wantName)
+			}
+			// A page Notion returned is present, so it's never gone. RefreshProjects sets gone_at, not the mapping
+			if got.GoneAt != nil {
+				t.Errorf("GoneAt = %v, want nil", *got.GoneAt)
+			}
+		})
+	}
+}
+
+// The ID a task stores for its project and the ID the project is cached under must be the same,
+// or task list can't join them
+func TestMapPageToProject_IDMatchesTaskProjectID(t *testing.T) {
+	const projectID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	task := mapPageToTask(decodePage(t, `{
+		"object": "page",
+		"id": "11111111-2222-3333-4444-555555555555",
+		"created_time": "2026-11-02T09:00:00.000Z",
+		"last_edited_time": "2026-11-02T09:00:00.000Z",
+		"in_trash": false,
+		"properties": {"Project": {"id": "p1", "type": "relation", "relation": [{"id": "`+projectID+`"}], "has_more": false}}
+	}`), testContextID)
+
+	project := mapPageToProject(decodePage(t, `{
+		"object": "page",
+		"id": "`+projectID+`",
+		"created_time": "2026-11-02T09:00:00.000Z",
+		"last_edited_time": "2026-11-02T09:00:00.000Z",
+		"in_trash": false,
+		"properties": {}
+	}`), testContextID)
+
+	if task.ProjectPageID == nil {
+		t.Fatal("task ProjectPageID = nil, want the project's ID")
+	}
+	if *task.ProjectPageID != project.PageID {
+		t.Errorf("task ProjectPageID = %q, project PageID = %q, want them equal", *task.ProjectPageID, project.PageID)
+	}
+}
+
 // decodePage decodes a page as Notion returns it, so the test also checks that
 // notion.Page's JSON tags match the shapes of the properties
 func decodePage(t *testing.T, s string) notion.Page {
@@ -446,7 +583,7 @@ func pagesWithIDs(ids ...string) []notion.Page {
 // arguments are recorded separately
 func refreshOnce(t *testing.T, st *store.Store, now time.Time, fetcher *fakeNotionFetcher, full bool) (RefreshResult, error) {
 	t.Helper()
-	return Refresh(t.Context(), fakeClock{nowUTC: now}, st, fetcher, "1234", full)
+	return Refresh(t.Context(), fakeClock{nowUTC: now}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID, full)
 }
 
 // checkTime fails the test unless got and want are both nil, or both set to the same instant
@@ -525,6 +662,12 @@ func TestRefresh_Since(t *testing.T) {
 				t.Fatalf("second fetcher invoked %d times, want 1", second.invokedTimes)
 			}
 			checkTime(t, "since", second.sinceFilterUsed, tc.wantSince)
+
+			// Projects are always fetched in full, so gone projects are found on every refresh
+			if second.projectsQueriedTimes != 1 {
+				t.Fatalf("second fetcher queried projects %d times, want 1", second.projectsQueriedTimes)
+			}
+			checkTime(t, "projects since", second.projectsSinceUsed, nil)
 		})
 	}
 }
@@ -560,8 +703,8 @@ func TestRefresh_Full_CountsGoneTasks(t *testing.T) {
 				t.Fatalf("full Refresh() error = %v", err)
 			}
 
-			if fetcher.dataSourceIDQueried != "1234" {
-				t.Errorf("data source %q queried, want %q", fetcher.dataSourceIDQueried, "1234")
+			if fetcher.dataSourceIDQueried != testTasksDataSourceID {
+				t.Errorf("data source %q queried, want %q", fetcher.dataSourceIDQueried, testTasksDataSourceID)
 			}
 			if res.FetchedCount != tc.wantFetched {
 				t.Errorf("FetchedCount = %d, want %d", res.FetchedCount, tc.wantFetched)
@@ -650,7 +793,7 @@ func TestRefresh_CancelledFetchStillRecordsFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	_, err := Refresh(ctx, fakeClock{nowUTC: firstRefreshAt}, st, &cancellingFetcher{cancel: cancel}, "1234", false)
+	_, err := Refresh(ctx, fakeClock{nowUTC: firstRefreshAt}, st, &cancellingFetcher{cancel: cancel}, testTasksDataSourceID, testProjectsDataSourceID, false)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Refresh() error = %v, want context.Canceled", err)
 	}

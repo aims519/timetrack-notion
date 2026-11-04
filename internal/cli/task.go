@@ -86,7 +86,11 @@ func executeRefreshUpdates(ctx context.Context, a *app, clock *refreshClock, nc 
 		return output.RefreshDoc{}, &clierr.Error{Code: clierr.NotInitialised, Message: "no tasks data source id found, run 'tt init' to set up connection to Notion"}
 	}
 
-	res, err := taskcache.Refresh(ctx, clock, a.db, nc, *cont.TasksDataSourceID, fullRefresh)
+	if cont.ProjectsDataSourceID == nil {
+		return output.RefreshDoc{}, &clierr.Error{Code: clierr.NotInitialised, Message: "no projects data source id found, run 'tt init' to set up connection to Notion"}
+	}
+
+	res, err := taskcache.Refresh(ctx, clock, a.db, nc, *cont.TasksDataSourceID, *cont.ProjectsDataSourceID, fullRefresh)
 	if err != nil {
 		return output.RefreshDoc{}, err
 	}

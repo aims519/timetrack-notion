@@ -42,7 +42,7 @@ func AutoRefresh(ctx context.Context, c clock, s *store.Store, n notionPageFetch
 		return RefreshResult{}, nil
 	}
 
-	// Don't refresh if last refresh less than 10 minutes ago, no error TODO check this is correct
+	// Don't refresh if last refresh less than 10 minutes ago, no error
 	if cacheState.TasksRefreshedAt != nil && nowUTC.Sub(*cacheState.TasksRefreshedAt) < (10*time.Minute) {
 		return RefreshResult{}, nil
 	}

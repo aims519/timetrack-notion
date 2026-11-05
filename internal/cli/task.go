@@ -129,7 +129,10 @@ func newListCmd(a *app) *cobra.Command {
 			// Auto refresh tasks if Notion token set
 			var warnings []output.Warning
 			if token := os.Getenv("NOTION_TOKEN"); token != "" {
-				warnings, _ = autoRefreshTaskCache(cmd.Context(), a, token)
+				warnings, err = autoRefreshTaskCache(cmd.Context(), a, token)
+				if err != nil {
+					return err
+				}
 			}
 
 			// Fetch tasks
@@ -178,7 +181,7 @@ func autoRefreshTaskCache(ctx context.Context, a *app, notionToken string) ([]ou
 
 	res, err := taskcache.AutoRefresh(ctx, c, a.db, notionClient, *cont.TasksDataSourceID, *cont.ProjectsDataSourceID)
 	if err != nil {
-		return []output.Warning{{Code: output.TaskCacheStale, Message: "auto task refresh failed, using cached tasks"}}, err
+		return []output.Warning{{Code: output.TaskCacheStale, Message: fmt.Sprintf("auto task refresh failed: %v", err)}}, nil
 	}
 
 	if res.BackoffSkip {

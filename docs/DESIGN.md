@@ -111,7 +111,7 @@ Entries display their description, else the task name. Descriptions are at most 
 | Command | Behaviour |
 |---|---|
 | `tt init [--tasks-db ID] [--projects-db ID] [--parent-page ID] [--project NAME]` | Connects the context to Notion (§5). `--tasks-db` and `--projects-db` take database IDs, as shown in each database's URL; `init` looks up their data sources. Every prompt has a flag. Safe to re-run; also how the default project is changed. |
-| `tt task list [--project NAME] [--all] [--limit N]` | Cached tasks with order, short ID and name; open tasks in the current project by default, `--all` adds done tasks. How scripts discover task IDs. |
+| `tt task list [--project NAME] [--all] [--limit N]` | Cached tasks with order, short ID and name; open tasks in the current project by default, `--all` adds done tasks. Refreshes the cache first if stale, as in §3.1; a failed refresh, or one skipped by the back-off, warns (`task_cache_stale`) and lists from the cache. With no `NOTION_TOKEN` it lists from the cache without refreshing or warning. How scripts discover task IDs. |
 | `tt task refresh [--full]` | Refreshes now, ignoring TTL and back-off. `--full` also detects deleted or trashed tasks. |
 
 ## 4. Data model

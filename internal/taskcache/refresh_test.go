@@ -776,8 +776,8 @@ func TestRefresh_FailureKeepsEarlierRefresh(t *testing.T) {
 	}
 }
 
-// cancellingFetcher cancels the refresh's context while the fetch is in progress, as Ctrl-C or
-// the automatic refresh's time limit would, then fails as the cancelled request would
+// cancellingFetcher cancels the refresh's context while the fetch is in progress, as Ctrl-C
+// would, then fails as the cancelled request would
 type cancellingFetcher struct {
 	cancel context.CancelFunc
 }
@@ -787,7 +787,7 @@ func (f *cancellingFetcher) QueryDataSource(ctx context.Context, dataSourceID st
 	return nil, ctx.Err()
 }
 
-func TestRefresh_CancelledFetchStillRecordsFailure(t *testing.T) {
+func TestRefresh_CancelledFetchDoesNotRecordFailure(t *testing.T) {
 	st := openTestStore(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -798,8 +798,38 @@ func TestRefresh_CancelledFetchStillRecordsFailure(t *testing.T) {
 		t.Fatalf("Refresh() error = %v, want context.Canceled", err)
 	}
 
-	// The failure is written after the context is cancelled, so this only passes because
-	// Refresh writes it with a context that ignores cancellation
+	// A cancellation says nothing about whether Notion is reachable, so it doesn't start the back-off
+	cacheState, err := st.CacheState(t.Context())
+	if err != nil {
+		t.Fatalf("CacheState() error = %v", err)
+	}
+	checkTime(t, "TasksRefreshFailedAt", cacheState.TasksRefreshFailedAt, nil)
+	checkTime(t, "TasksRefreshedAt", cacheState.TasksRefreshedAt, nil)
+}
+
+// slowFetcher blocks until the refresh's context ends, as a request to an unresponsive Notion
+// would, then fails as that request would
+type slowFetcher struct{}
+
+func (f slowFetcher) QueryDataSource(ctx context.Context, dataSourceID string, since *time.Time) ([]notion.Page, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRefresh_TimedOutFetchRecordsFailure(t *testing.T) {
+	st := openTestStore(t)
+
+	// Long enough for Refresh to read the cache state, so the deadline expires during the fetch
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := Refresh(ctx, fakeClock{nowUTC: firstRefreshAt}, st, slowFetcher{}, testTasksDataSourceID, testProjectsDataSourceID, false)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Refresh() error = %v, want context.DeadlineExceeded", err)
+	}
+
+	// The failure is written after the deadline has passed, so this only passes because
+	// Refresh writes it with a context that ignores the deadline
 	cacheState, err := st.CacheState(t.Context())
 	if err != nil {
 		t.Fatalf("CacheState() error = %v", err)
@@ -831,6 +861,220 @@ func TestRefresh_CacheStateUnreadable_DoesNotFetch(t *testing.T) {
 	}
 
 	// Without the cache state it can't work out what to ask for, so Notion isn't called at all
+	if fetcher.invokedTimes != 0 {
+		t.Errorf("fetcher invoked %d times, want 0", fetcher.invokedTimes)
+	}
+}
+
+func autoRefreshOnce(t *testing.T, st *store.Store, now time.Time, fetcher notionPageFetcher) (RefreshResult, error) {
+	t.Helper()
+	return AutoRefresh(t.Context(), fakeClock{nowUTC: now}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID)
+}
+
+func TestAutoRefresh_DecidesWhetherToRefresh(t *testing.T) {
+	now := secondRefreshAt
+
+	// A zero duration means it has never happened
+	tests := []struct {
+		name            string
+		refreshedAgo    time.Duration
+		failedAgo       time.Duration
+		wantRefresh     bool
+		wantBackoffSkip bool
+	}{
+		{name: "never refreshed", wantRefresh: true},
+		{name: "refreshed under 10 minutes ago", refreshedAgo: 10*time.Minute - time.Second, wantRefresh: false},
+		{name: "refreshed exactly 10 minutes ago", refreshedAgo: 10 * time.Minute, wantRefresh: true},
+		{name: "refreshed over 10 minutes ago", refreshedAgo: 10*time.Minute + time.Second, wantRefresh: true},
+		{name: "never refreshed, failed under a minute ago", failedAgo: time.Minute - time.Second, wantRefresh: false, wantBackoffSkip: true},
+		{name: "stale, failed under a minute ago", refreshedAgo: time.Hour, failedAgo: time.Minute - time.Second, wantRefresh: false, wantBackoffSkip: true},
+		{name: "stale, failed exactly a minute ago", refreshedAgo: time.Hour, failedAgo: time.Minute, wantRefresh: true},
+		{name: "stale, failed over a minute ago", refreshedAgo: time.Hour, failedAgo: time.Minute + time.Second, wantRefresh: true},
+		{name: "fresh, failed over a minute ago", refreshedAgo: time.Minute, failedAgo: 5 * time.Minute, wantRefresh: false},
+		// A fresh cache isn't stale, so a recent failure mustn't report a back-off skip
+		{name: "fresh, failed under a minute ago", refreshedAgo: time.Minute, failedAgo: 30 * time.Second, wantRefresh: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t)
+
+			var wantRefreshedAt, wantFailedAt *time.Time
+			if tc.refreshedAgo != 0 {
+				refreshedAt := now.Add(-tc.refreshedAgo)
+				wantRefreshedAt = &refreshedAt
+				if _, err := refreshOnce(t, st, refreshedAt, &fakeNotionFetcher{pages: pagesWithIDs("page-1")}, false); err != nil {
+					t.Fatalf("seeding Refresh() error = %v", err)
+				}
+			}
+			if tc.failedAgo != 0 {
+				failedAt := now.Add(-tc.failedAgo)
+				wantFailedAt = &failedAt
+				if err := st.RecordTasksRefreshFailed(t.Context(), failedAt); err != nil {
+					t.Fatalf("RecordTasksRefreshFailed() error = %v", err)
+				}
+			}
+
+			fetcher := &fakeNotionFetcher{pages: pagesWithIDs("page-2")}
+			res, err := autoRefreshOnce(t, st, now, fetcher)
+			if err != nil {
+				t.Fatalf("AutoRefresh() error = %v, want nil", err)
+			}
+
+			wantQueries, wantFetched := 0, 0
+			var wantResultAt time.Time
+			if tc.wantRefresh {
+				wantQueries, wantFetched = 1, 1
+				wantResultAt = now
+				wantRefreshedAt = &now
+			}
+
+			if fetcher.invokedTimes != wantQueries {
+				t.Errorf("tasks queried %d times, want %d", fetcher.invokedTimes, wantQueries)
+			}
+			if fetcher.projectsQueriedTimes != wantQueries {
+				t.Errorf("projects queried %d times, want %d", fetcher.projectsQueriedTimes, wantQueries)
+			}
+			if res.FetchedCount != wantFetched {
+				t.Errorf("FetchedCount = %d, want %d", res.FetchedCount, wantFetched)
+			}
+			if !res.RefreshedAt.Equal(wantResultAt) {
+				t.Errorf("RefreshedAt = %v, want %v", res.RefreshedAt, wantResultAt)
+			}
+			if res.BackoffSkip != tc.wantBackoffSkip {
+				t.Errorf("BackoffSkip = %v, want %v", res.BackoffSkip, tc.wantBackoffSkip)
+			}
+
+			// Skipping leaves the state alone. In particular it doesn't restart the back-off, which
+			// would stop commands run less than a minute apart from ever refreshing
+			cacheState, err := st.CacheState(t.Context())
+			if err != nil {
+				t.Fatalf("CacheState() error = %v", err)
+			}
+			checkTime(t, "TasksRefreshedAt", cacheState.TasksRefreshedAt, wantRefreshedAt)
+			checkTime(t, "TasksRefreshFailedAt", cacheState.TasksRefreshFailedAt, wantFailedAt)
+		})
+	}
+}
+
+func TestAutoRefresh_IsIncremental(t *testing.T) {
+	st := openTestStore(t)
+
+	if _, err := refreshOnce(t, st, firstRefreshAt, &fakeNotionFetcher{pages: pagesWithIDs("page-1")}, true); err != nil {
+		t.Fatalf("seeding Refresh() error = %v", err)
+	}
+
+	// page-1 isn't returned this time. An incremental refresh must not treat that as gone
+	fetcher := &fakeNotionFetcher{pages: pagesWithIDs("page-2")}
+	res, err := autoRefreshOnce(t, st, secondRefreshAt, fetcher)
+	if err != nil {
+		t.Fatalf("AutoRefresh() error = %v", err)
+	}
+
+	wantSince := firstRefreshAt.Add(-taskRefreshOverlapMinutes * time.Minute)
+	checkTime(t, "tasks since", fetcher.sinceFilterUsed, &wantSince)
+	if res.GoneCount != nil {
+		t.Errorf("GoneCount = %d, want nil", *res.GoneCount)
+	}
+
+	cacheState, err := st.CacheState(t.Context())
+	if err != nil {
+		t.Fatalf("CacheState() error = %v", err)
+	}
+	checkTime(t, "TasksFullRefreshedAt", cacheState.TasksFullRefreshedAt, &firstRefreshAt)
+}
+
+// deadlineRecordingFetcher records the deadline of the context the refresh passes to Notion
+type deadlineRecordingFetcher struct {
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (f *deadlineRecordingFetcher) QueryDataSource(ctx context.Context, dataSourceID string, since *time.Time) ([]notion.Page, error) {
+	f.deadline, f.hasDeadline = ctx.Deadline()
+	return nil, nil
+}
+
+func TestAutoRefresh_CapsRefreshAtTwoSeconds(t *testing.T) {
+	st := openTestStore(t)
+	fetcher := &deadlineRecordingFetcher{}
+
+	before := time.Now()
+	if _, err := autoRefreshOnce(t, st, firstRefreshAt, fetcher); err != nil {
+		t.Fatalf("AutoRefresh() error = %v", err)
+	}
+	after := time.Now()
+
+	if !fetcher.hasDeadline {
+		t.Fatal("fetch context has no deadline, want one 2s after the refresh starts")
+	}
+	if fetcher.deadline.Before(before.Add(2*time.Second)) || fetcher.deadline.After(after.Add(2*time.Second)) {
+		t.Errorf("deadline = %v, want between %v and %v", fetcher.deadline, before.Add(2*time.Second), after.Add(2*time.Second))
+	}
+}
+
+func TestAutoRefresh_FailureBacksOffForAMinute(t *testing.T) {
+	st := openTestStore(t)
+
+	if _, err := refreshOnce(t, st, firstRefreshAt, &fakeNotionFetcher{pages: pagesWithIDs("page-1")}, false); err != nil {
+		t.Fatalf("seeding Refresh() error = %v", err)
+	}
+
+	fetchErr := &clierr.Error{Code: clierr.Offline, Message: "notion unreachable"}
+	failedAt := secondRefreshAt
+	if _, err := autoRefreshOnce(t, st, failedAt, &fakeNotionFetcher{err: fetchErr}); !errors.Is(err, fetchErr) {
+		t.Fatalf("AutoRefresh() error = %v, want the fetcher's error unchanged", err)
+	}
+
+	cacheState, err := st.CacheState(t.Context())
+	if err != nil {
+		t.Fatalf("CacheState() error = %v", err)
+	}
+	checkTime(t, "TasksRefreshFailedAt", cacheState.TasksRefreshFailedAt, &failedAt)
+	checkTime(t, "TasksRefreshedAt", cacheState.TasksRefreshedAt, &firstRefreshAt)
+
+	during := &fakeNotionFetcher{pages: pagesWithIDs("page-1")}
+	if _, err := autoRefreshOnce(t, st, failedAt.Add(30*time.Second), during); err != nil {
+		t.Fatalf("AutoRefresh() during back-off error = %v, want nil", err)
+	}
+	if during.invokedTimes != 0 {
+		t.Errorf("fetcher invoked %d times during back-off, want 0", during.invokedTimes)
+	}
+
+	retriedAt := failedAt.Add(time.Minute)
+	after := &fakeNotionFetcher{pages: pagesWithIDs("page-1")}
+	if _, err := autoRefreshOnce(t, st, retriedAt, after); err != nil {
+		t.Fatalf("AutoRefresh() after back-off error = %v", err)
+	}
+	if after.invokedTimes != 1 {
+		t.Errorf("fetcher invoked %d times after back-off, want 1", after.invokedTimes)
+	}
+
+	cacheState, err = st.CacheState(t.Context())
+	if err != nil {
+		t.Fatalf("CacheState() error = %v", err)
+	}
+	checkTime(t, "TasksRefreshedAt", cacheState.TasksRefreshedAt, &retriedAt)
+}
+
+func TestAutoRefresh_CacheStateUnreadable_DoesNotFetch(t *testing.T) {
+	st := openTestStore(t)
+
+	// Every query on a closed store fails. Closing again in openTestStore's cleanup is harmless
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	fetcher := &fakeNotionFetcher{pages: pagesWithIDs("page-1")}
+	_, err := autoRefreshOnce(t, st, firstRefreshAt, fetcher)
+
+	var cliErr *clierr.Error
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("AutoRefresh() error = %v (%T), want a *clierr.Error", err, err)
+	}
+	if cliErr.Code != clierr.DatabaseUnusable {
+		t.Errorf("error code = %q, want %q", cliErr.Code, clierr.DatabaseUnusable)
+	}
 	if fetcher.invokedTimes != 0 {
 		t.Errorf("fetcher invoked %d times, want 0", fetcher.invokedTimes)
 	}

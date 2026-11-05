@@ -2,6 +2,7 @@ package taskcache
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -23,30 +24,60 @@ type RefreshResult struct {
 	RefreshedAt  time.Time
 	FetchedCount int
 	GoneCount    *int
+	BackoffSkip  bool
 }
 
-func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, tasksDataSourceID, projectsDataSourceID string, full bool) (RefreshResult, error) {
+// AutoRefresh refreshes cached tasks if the last refresh was more than 10 minutes ago,
+// and is allowed to run for no more than 2 seconds. If this timeout is exceeded or any
+// other failure is encountered, further refresh attempts are blocked for 1 minute
+func AutoRefresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, tasksDataSourceID, projectsDataSourceID string) (RefreshResult, error) {
+	nowUTC := c.NowUTC()
+
+	cacheState, err := s.CacheState(ctx)
+	if err != nil {
+		return RefreshResult{}, err
+	}
+
+	// Don't refresh if last refresh less than 10 minutes ago, no error
+	if cacheState.TasksRefreshedAt != nil && nowUTC.Sub(*cacheState.TasksRefreshedAt) < (10*time.Minute) {
+		return RefreshResult{}, nil
+	}
+
+	// 1 minute backoff before retrying refresh
+	if cacheState.TasksRefreshFailedAt != nil && nowUTC.Sub(*cacheState.TasksRefreshFailedAt) < time.Minute {
+		return RefreshResult{BackoffSkip: true}, nil
+	}
+
+	// Incremental refresh (full = false), capped at 2 seconds
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return Refresh(ctx, c, s, n, tasksDataSourceID, projectsDataSourceID, false)
+}
+
+func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, tasksDataSourceID, projectsDataSourceID string, full bool) (result RefreshResult, err error) {
+	nowUTC := c.NowUTC()
+
 	// Fetch last refresh from DB
 	cacheState, err := s.CacheState(ctx)
 	if err != nil {
 		return RefreshResult{}, err
 	}
 
-	nowUTC := c.NowUTC()
+	// Ensure any timeout/error refresh failures are recorded
+	defer func() {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			noCancelCtx := context.WithoutCancel(ctx)
+			_ = s.RecordTasksRefreshFailed(noCancelCtx, nowUTC)
+		}
+	}()
 
 	projects, err := fetchNotionProjects(ctx, n, projectsDataSourceID)
 	if err != nil {
-		// overall refresh timeout should not apply here since we always want this write to succeed
-		ctx = context.WithoutCancel(ctx)
-		_ = s.RecordTasksRefreshFailed(ctx, nowUTC)
 		return RefreshResult{}, err
 	}
 
 	tasks, err := fetchNotionTasks(ctx, n, tasksDataSourceID, cacheState.TasksRefreshedAt, full)
 	if err != nil {
-		// overall refresh timeout should not apply here since we always want this write to succeed
-		ctx = context.WithoutCancel(ctx)
-		_ = s.RecordTasksRefreshFailed(ctx, nowUTC)
 		return RefreshResult{}, err
 	}
 
@@ -61,13 +92,11 @@ func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, 
 		return RefreshResult{}, err
 	}
 
-	result := RefreshResult{
+	return RefreshResult{
 		RefreshedAt:  nowUTC,
 		FetchedCount: len(tasks),
 		GoneCount:    goneCount,
-	}
-
-	return result, nil
+	}, nil
 }
 
 func fetchNotionProjects(ctx context.Context, n notionPageFetcher, dataSourceID string) ([]store.Project, error) {

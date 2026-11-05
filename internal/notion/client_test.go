@@ -747,6 +747,78 @@ func TestLookupDataSourceID_NoDataSources_ReturnsNotFound(t *testing.T) {
 	}
 }
 
+// Notion marks no data source as primary, so the lookup never chooses one (DESIGN.md decision 23)
+func TestLookupDataSourceID_SeveralDataSources_ReturnsCandidates(t *testing.T) {
+	const databaseID = "db-123"
+
+	type candidate struct {
+		DataSourceID string `json:"data_source_id"`
+		Name         string `json:"name"`
+	}
+	wantCandidates := []candidate{
+		{DataSourceID: "ds-1", Name: "Active"},
+		{DataSourceID: "ds-2", Name: "Archive"},
+	}
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseBody := `{
+			"object": "database",
+			"id": "db-123",
+			"data_sources": [
+				{"id": "ds-1", "name": "Active"},
+				{"id": "ds-2", "name": "Archive"}
+			]
+		}`
+
+		if _, err := w.Write([]byte(responseBody)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, "test-token", s.Client())
+
+	got, err := nc.LookupDataSourceID(t.Context(), databaseID)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+
+	if got != nil {
+		t.Errorf("expected no ID alongside an error, got %q", *got)
+	}
+
+	var ce *clierr.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("error %v is not a *clierr.Error", err)
+	}
+
+	if ce.Code != clierr.AmbiguousSelector {
+		t.Errorf("error code = %q, want %q", ce.Code, clierr.AmbiguousSelector)
+	}
+
+	// Compared as JSON, because that's the form the user sees and the contract (DESIGN.md §8)
+	b, err := json.Marshal(ce.Details)
+	if err != nil {
+		t.Fatalf("encoding details: %v", err)
+	}
+
+	var details struct {
+		Selector   string      `json:"selector"`
+		Candidates []candidate `json:"candidates"`
+	}
+	if err := json.Unmarshal(b, &details); err != nil {
+		t.Fatalf("decoding details %s: %v", b, err)
+	}
+
+	if details.Selector != databaseID {
+		t.Errorf("details.selector = %q, want %q", details.Selector, databaseID)
+	}
+
+	if !reflect.DeepEqual(details.Candidates, wantCandidates) {
+		t.Errorf("details.candidates = %+v, want %+v (details: %s)", details.Candidates, wantCandidates, b)
+	}
+}
+
 func TestLookupDataSourceID_InvalidJSON_ReturnsInternal(t *testing.T) {
 	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write([]byte(`<html><body>not JSON</body></html>`)); err != nil {

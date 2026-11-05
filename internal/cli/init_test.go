@@ -215,6 +215,87 @@ func TestRun_Init_NotionErrors(t *testing.T) {
 	}
 }
 
+// The selector says which database has several data sources, and the candidates reach the user
+// through the error document (DESIGN.md §8 and decision 23)
+func TestRun_Init_SeveralDataSources_ReturnsCandidates(t *testing.T) {
+	type candidate struct {
+		DataSourceID string `json:"data_source_id"`
+		Name         string `json:"name"`
+	}
+	wantCandidates := []candidate{
+		{DataSourceID: "ds-1", Name: "Active"},
+		{DataSourceID: "ds-2", Name: "Archive"},
+	}
+
+	severalDataSources := notionResponse{http.StatusOK, `{
+		"object": "database",
+		"data_sources": [
+			{"id": "ds-1", "name": "Active"},
+			{"id": "ds-2", "name": "Archive"}
+		]
+	}`}
+
+	tests := []struct {
+		name         string
+		args         []string
+		responses    map[string]notionResponse
+		wantSelector string
+	}{
+		{
+			name:         "tasks_database",
+			args:         []string{"--tasks-db", tasksDatabaseID},
+			responses:    map[string]notionResponse{tasksDatabasePath: severalDataSources},
+			wantSelector: tasksDatabaseID,
+		},
+		{
+			name:         "projects_database",
+			args:         []string{"--projects-db", projectsDatabaseID},
+			responses:    map[string]notionResponse{projectsDatabasePath: severalDataSources},
+			wantSelector: projectsDatabaseID,
+		},
+		// Edge cases
+		{
+			// The selector names the database with the problem, not the one that was fine
+			name: "projects_database_with_tasks_database_fine",
+			args: []string{"--tasks-db", tasksDatabaseID, "--projects-db", projectsDatabaseID},
+			responses: map[string]notionResponse{
+				tasksDatabasePath:    databaseFound,
+				projectsDatabasePath: severalDataSources,
+			},
+			wantSelector: projectsDatabaseID,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := fakeNotion(t, tc.responses)
+
+			exit, stdout, stderr := runInit(t, s.URL, s.Client(), tc.args...)
+
+			checkInitError(t, exit, stdout, stderr, 3, clierr.AmbiguousSelector)
+
+			var doc struct {
+				Error struct {
+					Details struct {
+						Selector   string      `json:"selector"`
+						Candidates []candidate `json:"candidates"`
+					} `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(stderr, &doc); err != nil {
+				t.Fatalf("unable to decode error document %q: %v", stderr, err)
+			}
+
+			if doc.Error.Details.Selector != tc.wantSelector {
+				t.Errorf("details.selector = %q, want %q", doc.Error.Details.Selector, tc.wantSelector)
+			}
+			if !slices.Equal(doc.Error.Details.Candidates, wantCandidates) {
+				t.Errorf("details.candidates = %+v, want %+v (stderr: %s)", doc.Error.Details.Candidates, wantCandidates, stderr)
+			}
+		})
+	}
+}
+
 // When Notion can't be reached there's no HTTP status to map, so the error is offline (DESIGN.md §8)
 func TestRun_Init_NotionUnreachable_ReturnsOffline(t *testing.T) {
 	// NewTestServer's in-memory network accepts every connection, even once the server is closed,

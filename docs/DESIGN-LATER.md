@@ -195,3 +195,11 @@ Offer to add a **rollup** on the tasks database (e.g. `Tracked (min)`: sum of `M
 **Touches:** §3 (global flags), §8 (Conventions).
 
 v1 prints JSON compactly, on one line. A flag such as `--indent` (or an `--output json-pretty` value) would print the same document indented, for reading by eye. It changes formatting only, never the content, so the JSON contract is unaffected. Until then, pipe the output through `jq`.
+
+## 11. Choosing a data source in `init`
+
+**Touches:** §3.4 (`init` flags), §5, §8 (`ambiguous_selector`), decisions 22 and 23. v1 fails with `ambiguous_selector`, listing the data sources, when a tasks or projects database has more than one.
+
+`tt init` gains `--tasks-data-source ID` and `--projects-data-source ID`, each used alongside the matching database flag. The ID is checked against the `data_sources` list `init` has already fetched, so it needs no extra API call; an ID not in the list is `not_found`. Decision 22 preferred database IDs because data-source IDs are hard to find, but here the error that sends someone to these flags lists the IDs they need.
+
+An interactive picker can offer the same list. Without a terminal, the flags are the way to choose, which keeps to §8's rule that every `init` prompt has a flag.

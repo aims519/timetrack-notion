@@ -189,5 +189,18 @@ func (c *Client) LookupDataSourceID(ctx context.Context, databaseID string) (*st
 		return nil, &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("no data source found for database, %q", databaseID)}
 	}
 
+	if len(dbResult.DataSources) > 1 {
+		type dataSourceCandidate struct {
+			ID   string `json:"data_source_id"`
+			Name string `json:"name"`
+		}
+
+		var candidates []dataSourceCandidate
+		for _, can := range dbResult.DataSources {
+			candidates = append(candidates, dataSourceCandidate(can))
+		}
+		return nil, &clierr.Error{Code: clierr.AmbiguousSelector, Message: "database has more than one data source", Details: map[string]any{"selector": databaseID, "candidates": candidates}}
+	}
+
 	return &dbResult.DataSources[0].ID, nil
 }

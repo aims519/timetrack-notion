@@ -40,7 +40,7 @@ Status: design draft, v1 scope. Binary name `tt` is a placeholder. Deferred feat
 
 **Not in v1:** pulling Notion edits back down (entries are push-only; tasks are a read-only cache); multiple users, reports, invoicing, a TUI or web UI, a daemon; syncing a running timer.
 
-**Deferred** ([DESIGN-LATER.md](DESIGN-LATER.md)): automatic sync after changes; multiple contexts and the OS keychain; `tt config`; `HH:MM` meaning yesterday and full DST handling; task name matching; `sync --dry-run` and the schema check; `sync --strict`; the rollup offer in `init`; an option to indent JSON output.
+**Deferred** ([DESIGN-LATER.md](DESIGN-LATER.md)): automatic sync after changes; multiple contexts and the OS keychain; `tt config`; `HH:MM` meaning yesterday and full DST handling; task name matching; `sync --dry-run` and the schema check; `sync --strict`; the rollup offer in `init`; an option to indent JSON output; choosing between data sources in `init`.
 
 **Stretch:** `tt import <toggl.csv>` (backfill Toggl history as unattached entries); `sync --push-unattached`; an opt-in semantic task matcher.
 
@@ -236,7 +236,7 @@ Parent page (shared with the integration)
 `init` checks before creating anything, so re-running reuses what exists:
 
 1. Validate `NOTION_TOKEN` with a "who am I" call; if unset, `no_token`.
-2. Find the tasks and projects databases, by the IDs given in `--tasks-db` and `--projects-db` or at the prompts, and look up each one's data source (`GET /v1/databases/{id}` lists its `data_sources`). If none are visible, say which page to share.
+2. Find the tasks and projects databases, by the IDs given in `--tasks-db` and `--projects-db` or at the prompts, and look up each one's data source (`GET /v1/databases/{id}` lists its `data_sources`). If none are visible, say which page to share. A database with more than one data source fails with `ambiguous_selector` (exit 3), listing them, with no prompt: `init` never chooses one (decision 23).
 3. Map the task properties (name, project, order, done), detecting defaults.
 4. Create the **Time entries** database under the parent page:
 
@@ -361,7 +361,7 @@ Table output is for people and may change. **JSON output (`--output json`) is th
 
 ### Task item
 
-Used in `task list` and in `ambiguous_selector` candidates.
+Used in `task list` and in the `ambiguous_selector` candidates for a task selector.
 
 ```json
 {
@@ -467,7 +467,7 @@ Example, `tt status` before `init`:
 |---|---|
 | `timer_running` | `{"entry": <entry>}` |
 | `offline` | `{"synced": n, "pending": n}` from `sync`; `null` from other commands |
-| `ambiguous_selector` | `{"selector": "...", "candidates": [<task items>]}` |
+| `ambiguous_selector` | `{"selector": "...", "candidates": [...]}`. Candidates are task items for a task selector, `{"page_id", "name"}` for a project name, and `{"data_source_id", "name"}` for a database ID |
 | `not_found` | `{"selector": "..."}` |
 | `invalid_time` | `{"input": "..."}` |
 | `confirmation_required` | `{"flag": "--yes"}` |
@@ -530,7 +530,6 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **8.** Short IDs are relative to the cache and may lengthen; scripts should store full page IDs.
 - **9.** Overlaps are allowed with a warning; rejecting them without `--force` would stop double counting at the cost of friction. Revisit after real use.
 - **19.** Probe still needed (on `2026-03-11`): trashing an already-trashed page, and retrieving a trashed page reporting `in_trash` (§6.1, §6.3).
-- **23.** A tasks or projects database with more than one data source: whether `init` asks which to use or fails with `usage`, listing them.
 
 ### Resolved
 
@@ -547,3 +546,4 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **20.** The data directory follows XDG: `$XDG_DATA_HOME/tt` on any OS, else `%LOCALAPPDATA%\tt` on Windows (local, not roaming, because a database shouldn't sync between machines) and `~/.local/share/tt` elsewhere. It's always the directory holding the database, and each database gets its own lock file beside it, so two databases never share a lock. An empty `TT_DB` is an error, not a request for the default, and a `TT_DB` path's parent must already exist. Rejected: a visible `~/tt` (clutters the home directory) and `~/Library/Application Support` on macOS (awkward to type, and developer CLIs commonly use XDG there).
 - **21.** Migrations run with goose, so `schema_migrations` has goose's layout (§4) rather than `(version, applied_at)`, and files are numbered sequentially rather than by timestamp. Goose doesn't re-check the version inside each migration's transaction, so concurrent first runs are serialised with a lock file instead ([#9](https://github.com/aims519/timetrack-notion/issues/9)). Rejected: a hand-written runner (more code to own for no v1 gain) and idempotent migrations (goose would still record a version twice).
 - **22.** `init` takes database IDs, not data-source IDs, because a database ID is in the database's URL and easy to find, while a data-source ID is buried in Notion's settings. `init` resolves each to its data source, and `contexts` stores the data-source IDs (§4), since queries go through data sources (§10).
+- **23.** A tasks or projects database with more than one data source fails with `ambiguous_selector` (exit 3), listing them as candidates (§5, §8). Notion marks no data source as primary and doesn't document an order, so taking the first could silently read the wrong tasks. The code is `ambiguous_selector` rather than `usage` because the command is well formed and the ID matches several things. A way to choose one is deferred ([DESIGN-LATER.md](DESIGN-LATER.md) §11); adding it later doesn't change this error. Rejected: choosing by name or schema (a guess when sources are similar), and telling people to reduce the database to one source (other views or people may depend on them).

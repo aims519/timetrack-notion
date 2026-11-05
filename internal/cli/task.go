@@ -126,6 +126,12 @@ func newListCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			// Auto refresh tasks if Notion token set
+			var warnings []output.Warning
+			if token := os.Getenv("NOTION_TOKEN"); token != "" {
+				warnings, _ = autoRefreshTaskCache(cmd.Context(), a, token)
+			}
+
 			// Fetch tasks
 			tasks, truncated, err := a.db.ListTasks(cmd.Context(), limit, all)
 			if err != nil {
@@ -142,7 +148,7 @@ func newListCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			doc := mapDbTasks(tasks, shortIDMap, truncated)
+			doc := mapDbTasks(tasks, shortIDMap, truncated, warnings)
 			return output.Write(cmd.OutOrStdout(), cmd.ErrOrStderr(), *a.format, doc, loc)
 		},
 	}
@@ -151,4 +157,33 @@ func newListCmd(a *app) *cobra.Command {
 	listCmd.Flags().IntVar(&limit, "limit", store.NoLimit, "optionally limit the number of results")
 
 	return listCmd
+}
+
+func autoRefreshTaskCache(ctx context.Context, a *app, notionToken string) ([]output.Warning, error) {
+	cont, err := a.db.NotionContext(ctx, store.DefaultContextID)
+	if err != nil {
+		return nil, err
+	}
+
+	// If Notion context not initialised, skip silently
+	if cont.TasksDataSourceID == nil {
+		return nil, nil
+	}
+	if cont.ProjectsDataSourceID == nil {
+		return nil, nil
+	}
+
+	c := &refreshClock{}
+	notionClient := notion.NewClient(a.notionBaseURL, notionToken, a.notionHTTPClient)
+
+	res, err := taskcache.AutoRefresh(ctx, c, a.db, notionClient, *cont.TasksDataSourceID, *cont.ProjectsDataSourceID)
+	if err != nil {
+		return []output.Warning{{Code: output.TaskCacheStale, Message: "auto task refresh failed, using cached tasks"}}, err
+	}
+
+	if res.BackoffSkip {
+		return []output.Warning{{Code: output.TaskCacheStale, Message: "skipping refresh due to recent failure, using cached tasks"}}, nil
+	}
+
+	return nil, nil
 }

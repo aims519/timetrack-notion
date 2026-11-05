@@ -338,7 +338,7 @@ func TestMapDbTasks(t *testing.T) {
 		"4a74c34fa1b2c3": "a1b2c3",
 	}
 
-	doc := mapDbTasks(inputs, shortIDs, false)
+	doc := mapDbTasks(inputs, shortIDs, false, nil)
 
 	// The tasks keep the order they came from the store in
 	want := []output.TaskItem{
@@ -363,7 +363,7 @@ func TestMapDbTasks_Truncated(t *testing.T) {
 	inputs := []store.Task{{PageID: "3f63b23e837922", Name: "Write the sync engine"}}
 
 	for _, truncated := range []bool{false, true} {
-		doc := mapDbTasks(inputs, map[string]string{}, truncated)
+		doc := mapDbTasks(inputs, map[string]string{}, truncated, nil)
 
 		if doc.Truncated != truncated {
 			t.Errorf("mapDbTasks(truncated=%v) Truncated = %v", truncated, doc.Truncated)
@@ -373,12 +373,41 @@ func TestMapDbTasks_Truncated(t *testing.T) {
 
 func TestMapDbTasks_NoTasks(t *testing.T) {
 	for _, inputs := range [][]store.Task{nil, {}} {
-		doc := mapDbTasks(inputs, map[string]string{}, false)
+		doc := mapDbTasks(inputs, map[string]string{}, false, nil)
 
 		// tasks is always an array in JSON, so never nil (DESIGN.md §8)
 		if doc.Tasks == nil || len(doc.Tasks) != 0 {
 			t.Errorf("mapDbTasks(%v) Tasks = %v, want an empty slice", inputs, doc.Tasks)
 		}
+	}
+}
+
+func TestMapDbTasks_Warnings(t *testing.T) {
+	refreshFailed := output.Warning{Code: output.TaskCacheStale, Message: "refresh failed, using cached tasks"}
+	refreshSkipped := output.Warning{Code: output.TaskCacheStale, Message: "refresh skipped, using cached tasks"}
+
+	tests := []struct {
+		name     string
+		warnings []output.Warning
+		want     []output.Warning
+	}{
+		// warnings is always an array in JSON, so never nil (DESIGN.md §8)
+		{name: "nil", warnings: nil, want: []output.Warning{}},
+		{name: "empty", warnings: []output.Warning{}, want: []output.Warning{}},
+		{name: "one warning", warnings: []output.Warning{refreshFailed}, want: []output.Warning{refreshFailed}},
+		{name: "several keep their order", warnings: []output.Warning{refreshSkipped, refreshFailed}, want: []output.Warning{refreshSkipped, refreshFailed}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := []store.Task{{PageID: "3f63b23e837922", Name: "Write tests"}}
+
+			doc := mapDbTasks(inputs, map[string]string{}, false, tc.warnings)
+
+			if !reflect.DeepEqual(doc.Warnings, tc.want) {
+				t.Errorf("Warnings = %#v, want %#v", doc.Warnings, tc.want)
+			}
+		})
 	}
 }
 
@@ -418,7 +447,7 @@ func TestMapDbTasks_Project(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inputs := []store.Task{{PageID: "3f63b23e837922", Name: "Write tests", ProjectPageID: tc.projectPageID, ProjectName: tc.projectName}}
 
-			doc := mapDbTasks(inputs, map[string]string{}, false)
+			doc := mapDbTasks(inputs, map[string]string{}, false, nil)
 
 			if len(doc.Tasks) != 1 {
 				t.Fatalf("got %d tasks, want 1", len(doc.Tasks))

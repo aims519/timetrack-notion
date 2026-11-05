@@ -116,7 +116,7 @@ func runningEntryWarnings(e *store.Entry, nowUTC time.Time) []output.Warning {
 	return []output.Warning{}
 }
 
-func mapDbTasks(inputs []store.Task, shortIDMap map[string]string, truncated bool) output.TaskListDoc {
+func mapDbTasks(inputs []store.Task, shortIDMap map[string]string, truncated bool, w []output.Warning) output.TaskListDoc {
 	tasks := make([]output.TaskItem, len(inputs))
 	for i, obj := range inputs {
 		var shortID string
@@ -144,5 +144,5 @@ func mapDbTasks(inputs []store.Task, shortIDMap map[string]string, truncated boo
 		}
 	}
 
-	return output.NewTaskListDoc(tasks, truncated, nil)
+	return output.NewTaskListDoc(tasks, truncated, w)
 }

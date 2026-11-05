@@ -24,6 +24,7 @@ type RefreshResult struct {
 	RefreshedAt  time.Time
 	FetchedCount int
 	GoneCount    *int
+	BackoffSkip  bool
 }
 
 // AutoRefresh refreshes cached tasks if the last refresh was more than 10 minutes ago,
@@ -37,14 +38,14 @@ func AutoRefresh(ctx context.Context, c clock, s *store.Store, n notionPageFetch
 		return RefreshResult{}, err
 	}
 
-	// 1 minute backoff before retrying refresh
-	if cacheState.TasksRefreshFailedAt != nil && nowUTC.Sub(*cacheState.TasksRefreshFailedAt) < time.Minute {
-		return RefreshResult{}, nil
-	}
-
 	// Don't refresh if last refresh less than 10 minutes ago, no error
 	if cacheState.TasksRefreshedAt != nil && nowUTC.Sub(*cacheState.TasksRefreshedAt) < (10*time.Minute) {
 		return RefreshResult{}, nil
+	}
+
+	// 1 minute backoff before retrying refresh
+	if cacheState.TasksRefreshFailedAt != nil && nowUTC.Sub(*cacheState.TasksRefreshFailedAt) < time.Minute {
+		return RefreshResult{BackoffSkip: true}, nil
 	}
 
 	// Incremental refresh (full = false), capped at 2 seconds

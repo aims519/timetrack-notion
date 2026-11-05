@@ -6,6 +6,8 @@ import (
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/notion"
+	"github.com/aims519/timetrack-notion/internal/output"
+	"github.com/aims519/timetrack-notion/internal/store"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 	"github.com/spf13/cobra"
 )
@@ -13,11 +15,12 @@ import (
 func newInitCmd(a *app) *cobra.Command {
 	var tasksDbID string
 	var projectsDbID string
+	var projectName string
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "initialise Notion connection details",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := timeparse.CurrentLocation()
+			loc, err := timeparse.CurrentLocation()
 			if err != nil {
 				return err
 			}
@@ -35,8 +38,12 @@ func newInitCmd(a *app) *cobra.Command {
 				return &clierr.Error{Code: clierr.Usage, Message: "--projects-db value must not be empty"}
 			}
 
-			notionClient := notion.NewClient(a.notionBaseURL, token, a.notionHTTPClient)
+			if cmd.Flag("project").Changed && projectName == "" {
+				return &clierr.Error{Code: clierr.Usage, Message: "--project name must not be empty"}
+			}
 
+			// Data source lookups
+			notionClient := notion.NewClient(a.notionBaseURL, token, a.notionHTTPClient)
 			var tasksDataSourceID *string
 			if cmd.Flag("tasks-db").Changed {
 				ds, err := notionClient.LookupDataSourceID(cmd.Context(), tasksDbID)
@@ -55,15 +62,48 @@ func newInitCmd(a *app) *cobra.Command {
 				projectsDataSourceID = ds
 			}
 
-			//TODO create output doc
-			fmt.Printf("Tasks: %v, Projects: %v\n", tasksDataSourceID, projectsDataSourceID)
+			// TODO Map properties
 
-			return nil
+			// TODO Run refresh
+
+			// TODO Look up project name from cache
+
+			// TODO Create time entries database
+
+			// Update Context in DB
+			nc, err := a.db.NotionContext(cmd.Context(), store.DefaultContextID)
+			if err != nil {
+				return err
+			}
+
+			mergeNotionContextChanges(&nc, projectsDataSourceID, tasksDataSourceID)
+			err = a.db.SaveNotionContext(cmd.Context(), nc)
+			if err != nil {
+				return err
+			}
+
+			doc := output.NewInitDoc(output.NotionContext{
+				ContextID:            nc.ID,
+				TasksDataSourceID:    nc.TasksDataSourceID,
+				ProjectsDataSourceID: nc.ProjectsDataSourceID,
+				EntriesDataSourceID:  nc.EntriesDataSourceID,
+			}, nil)
+			return output.Write(cmd.OutOrStdout(), cmd.ErrOrStderr(), *a.format, doc, loc)
 		},
 	}
 
 	initCmd.Flags().StringVar(&tasksDbID, "tasks-db", "", "set tasks database ID")
 	initCmd.Flags().StringVar(&projectsDbID, "projects-db", "", "set projects database ID")
+	initCmd.Flags().StringVar(&projectName, "project", "", "name of the context's default project")
 
 	return initCmd
+}
+
+func mergeNotionContextChanges(nc *store.NotionContext, projectsDataSourceID, tasksDataSourceID *string) {
+	if tasksDataSourceID != nil {
+		nc.TasksDataSourceID = tasksDataSourceID
+	}
+	if projectsDataSourceID != nil {
+		nc.ProjectsDataSourceID = projectsDataSourceID
+	}
 }

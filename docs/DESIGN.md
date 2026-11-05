@@ -238,7 +238,9 @@ Parent page (shared with the integration)
 1. Validate `NOTION_TOKEN` with a "who am I" call; if unset, `no_token`.
 2. Find the tasks and projects databases, by the IDs given in `--tasks-db` and `--projects-db` or at the prompts, and look up each one's data source (`GET /v1/databases/{id}` lists its `data_sources`). If none are visible, say which page to share. A database with more than one data source fails with `ambiguous_selector` (exit 3), listing them, with no prompt: `init` never chooses one (decision 23).
 3. Map the task properties (name, project, order, done), detecting defaults.
-4. Create the **Time entries** database under the parent page:
+4. Do a full task refresh, which also fetches every project. Each data-source ID is the one just looked up if its database was given, otherwise the one stored in the context; if either is missing, `not_initialised`. This never uses the automatic refresh (§3.1), which can skip a recent refresh or match names from a previous database.
+5. Choose a default project, matching `--project` or the prompt's answer against the refreshed cache by the same rules as `task list --project`. A wrong name fails here, before anything is created in Notion or saved to the context, so re-running with the right name is enough.
+6. Create the **Time entries** database under the parent page:
 
    | Property | Type |
    |---|---|
@@ -249,8 +251,8 @@ Parent page (shared with the integration)
    | Local ID | text |
    | Minutes | formula: whole minutes from Start to End |
 
-5. Choose a default project, store the data-source IDs (the Time entries one comes from the create response) in one transaction, and do a full task refresh. Report how many earlier entries are waiting and suggest `tt attach --entry`.
-6. Print the steps for adding a `Tracked (min)` rollup to the tasks database by hand. Nothing depends on it.
+7. Store the data-source IDs (the Time entries one comes from the create response) and the default project in one transaction. Report how many earlier entries are waiting and suggest `tt attach --entry`.
+8. Print the steps for adding a `Tracked (min)` rollup to the tasks database by hand. Nothing depends on it.
 
 Notion computes all totals; the tool never writes a duration, and never touches existing hand-maintained fields.
 

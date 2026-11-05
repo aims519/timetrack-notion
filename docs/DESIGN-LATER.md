@@ -186,7 +186,7 @@ Tasks with `gone_at` set are excluded from name matching.
 
 **Touches:** §3.4 (`init` flags), §5. v1 prints the manual steps instead.
 
-`tt init` gains `--add-rollup | --no-add-rollup`, and step 5 becomes:
+`tt init` gains `--add-rollup | --no-add-rollup`, and step 8 becomes:
 
 Offer to add a **rollup** on the tasks database (e.g. `Tracked (min)`: sum of `Minutes` via the entries relation). The API can create the rollup, as it can the `Minutes` formula (verified in the spike); because the rollup is added to the user's own tasks database, it is offered and never added without asking. Detection is structural (a rollup through that relation, over `Minutes`, with `sum`), not by name. An existing property is never modified; a name clash with a different shape offers a different name or skipping. Declining prints manual steps, and nothing in the tool depends on the rollup.
 

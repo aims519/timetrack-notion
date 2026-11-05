@@ -876,20 +876,23 @@ func TestAutoRefresh_DecidesWhetherToRefresh(t *testing.T) {
 
 	// A zero duration means it has never happened
 	tests := []struct {
-		name         string
-		refreshedAgo time.Duration
-		failedAgo    time.Duration
-		wantRefresh  bool
+		name            string
+		refreshedAgo    time.Duration
+		failedAgo       time.Duration
+		wantRefresh     bool
+		wantBackoffSkip bool
 	}{
 		{name: "never refreshed", wantRefresh: true},
 		{name: "refreshed under 10 minutes ago", refreshedAgo: 10*time.Minute - time.Second, wantRefresh: false},
 		{name: "refreshed exactly 10 minutes ago", refreshedAgo: 10 * time.Minute, wantRefresh: true},
 		{name: "refreshed over 10 minutes ago", refreshedAgo: 10*time.Minute + time.Second, wantRefresh: true},
-		{name: "never refreshed, failed under a minute ago", failedAgo: time.Minute - time.Second, wantRefresh: false},
-		{name: "stale, failed under a minute ago", refreshedAgo: time.Hour, failedAgo: time.Minute - time.Second, wantRefresh: false},
+		{name: "never refreshed, failed under a minute ago", failedAgo: time.Minute - time.Second, wantRefresh: false, wantBackoffSkip: true},
+		{name: "stale, failed under a minute ago", refreshedAgo: time.Hour, failedAgo: time.Minute - time.Second, wantRefresh: false, wantBackoffSkip: true},
 		{name: "stale, failed exactly a minute ago", refreshedAgo: time.Hour, failedAgo: time.Minute, wantRefresh: true},
 		{name: "stale, failed over a minute ago", refreshedAgo: time.Hour, failedAgo: time.Minute + time.Second, wantRefresh: true},
 		{name: "fresh, failed over a minute ago", refreshedAgo: time.Minute, failedAgo: 5 * time.Minute, wantRefresh: false},
+		// A fresh cache isn't stale, so a recent failure mustn't report a back-off skip
+		{name: "fresh, failed under a minute ago", refreshedAgo: time.Minute, failedAgo: 30 * time.Second, wantRefresh: false},
 	}
 
 	for _, tc := range tests {
@@ -937,6 +940,9 @@ func TestAutoRefresh_DecidesWhetherToRefresh(t *testing.T) {
 			}
 			if !res.RefreshedAt.Equal(wantResultAt) {
 				t.Errorf("RefreshedAt = %v, want %v", res.RefreshedAt, wantResultAt)
+			}
+			if res.BackoffSkip != tc.wantBackoffSkip {
+				t.Errorf("BackoffSkip = %v, want %v", res.BackoffSkip, tc.wantBackoffSkip)
 			}
 
 			// Skipping leaves the state alone. In particular it doesn't restart the back-off, which

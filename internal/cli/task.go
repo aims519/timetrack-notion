@@ -107,6 +107,7 @@ func executeRefreshUpdates(ctx context.Context, a *app, clock *refreshClock, nc 
 func newListCmd(a *app) *cobra.Command {
 	var limit int
 	var all = false
+	var projectName string
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "list details of cached Notion tasks",
@@ -118,7 +119,34 @@ func newListCmd(a *app) *cobra.Command {
 			}
 
 			if cmd.Flag("limit").Changed && limit < 1 {
-				return &clierr.Error{Code: clierr.Usage, Message: "--limit must be at least 1 when provided"}
+				return &clierr.Error{Code: clierr.Usage, Message: "--limit must be at least 1"}
+			}
+
+			if cmd.Flag("project").Changed && projectName == "" {
+				return &clierr.Error{Code: clierr.Usage, Message: "--project must not be empty"}
+			}
+
+			var projectID *string
+			if cmd.Flag("project").Changed {
+				projects, err := a.db.ProjectsByName(cmd.Context(), projectName)
+				if err != nil {
+					return err
+				}
+
+				if len(projects) == 0 {
+					return &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("no project found that matches %q", projectName), Details: map[string]any{"selector": projectName}}
+				}
+
+				if len(projects) > 1 {
+					refs := make([]output.ProjectRef, len(projects))
+					for i, v := range projects {
+						refs[i] = output.ProjectRef{PageID: v.PageID, Name: v.Name}
+					}
+
+					return &clierr.Error{Code: clierr.AmbiguousSelector, Message: fmt.Sprintf("more than one project matches %q", projectName), Details: map[string]any{"selector": projectName, "candidates": refs}}
+				}
+
+				projectID = &projects[0].PageID
 			}
 
 			loc, err := timeparse.CurrentLocation()
@@ -127,7 +155,7 @@ func newListCmd(a *app) *cobra.Command {
 			}
 
 			// Fetch tasks
-			tasks, truncated, err := a.db.ListTasks(cmd.Context(), limit, all)
+			tasks, truncated, err := a.db.ListTasks(cmd.Context(), limit, all, projectID)
 			if err != nil {
 				return err
 			}
@@ -147,6 +175,7 @@ func newListCmd(a *app) *cobra.Command {
 		},
 	}
 
+	listCmd.Flags().StringVar(&projectName, "project", "", "provide a project name to filter results")
 	listCmd.Flags().BoolVar(&all, "all", all, "include 'done' tasks in results")
 	listCmd.Flags().IntVar(&limit, "limit", store.NoLimit, "optionally limit the number of results")
 

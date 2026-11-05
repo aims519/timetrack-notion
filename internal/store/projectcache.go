@@ -79,3 +79,53 @@ func (s *Store) RefreshProjects(ctx context.Context, projects []Project, nowUTC 
 
 	return goneCount, nil
 }
+
+func scanProject(s scanner) (Project, error) {
+	var p Project
+	var goneAtStr *string
+	err := s.Scan(&p.ContextID, &p.PageID, &p.Name, &goneAtStr)
+	if err != nil {
+		return Project{}, err
+	}
+
+	p.GoneAt, err = FromNullableDBString(goneAtStr)
+	if err != nil {
+		return Project{}, err
+	}
+
+	return p, err
+}
+
+func (s *Store) ProjectsByName(ctx context.Context, name string) ([]Project, error) {
+	rows, err := s.connectionPool.QueryContext(ctx, `
+		SELECT
+		projects.context_id,
+		projects.page_id,
+		projects.name,
+		projects.gone_at
+		FROM projects
+		WHERE projects.context_id = ?
+		AND projects.name = ? COLLATE NOCASE
+		AND projects.gone_at IS NULL
+		ORDER BY projects.name, projects.page_id
+	`, DefaultContextID, name)
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached projects: " + err.Error(), Cause: err, Details: map[string]any{"path": s.dbPath}}
+	}
+	defer func() { _ = rows.Close() }()
+
+	var projects []Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		projects = append(projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached projects", Cause: err, Details: map[string]any{"path": s.dbPath}}
+	}
+
+	return projects, nil
+}

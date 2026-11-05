@@ -91,7 +91,7 @@ func TestListTasks_Filters(t *testing.T) {
 			insertOtherContext(t, st)
 			insertListTasks(t, st, tasks)
 
-			got, _, err := st.ListTasks(t.Context(), 100, tc.all)
+			got, _, err := st.ListTasks(t.Context(), 100, tc.all, nil)
 			if err != nil {
 				t.Fatalf("ListTasks() want nil error, got %v", err)
 			}
@@ -106,7 +106,7 @@ func TestListTasks_Filters(t *testing.T) {
 func TestListTasks_EmptyCache(t *testing.T) {
 	st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 
-	got, truncated, err := st.ListTasks(t.Context(), 100, true)
+	got, truncated, err := st.ListTasks(t.Context(), 100, true, nil)
 	if err != nil {
 		t.Fatalf("ListTasks() want nil error, got %v", err)
 	}
@@ -211,7 +211,7 @@ func TestListTasks_Order(t *testing.T) {
 			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 			insertListTasks(t, st, tc.tasks)
 
-			got, _, err := st.ListTasks(t.Context(), 100, true)
+			got, _, err := st.ListTasks(t.Context(), 100, true, nil)
 			if err != nil {
 				t.Fatalf("ListTasks() want nil error, got %v", err)
 			}
@@ -258,7 +258,7 @@ func TestListTasks_Limit(t *testing.T) {
 			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 			insertListTasks(t, st, tasks)
 
-			got, truncated, err := st.ListTasks(t.Context(), tc.limit, tc.all)
+			got, truncated, err := st.ListTasks(t.Context(), tc.limit, tc.all, nil)
 			if err != nil {
 				t.Fatalf("ListTasks() want nil error, got %v", err)
 			}
@@ -285,7 +285,7 @@ func TestListTasks_Limit_FilteredRowsNotTruncated(t *testing.T) {
 		{contextID: otherContextID, pageID: "other_context", name: "E", order: ptr(5.0)},
 	})
 
-	got, truncated, err := st.ListTasks(t.Context(), 2, false)
+	got, truncated, err := st.ListTasks(t.Context(), 2, false, nil)
 	if err != nil {
 		t.Fatalf("ListTasks() want nil error, got %v", err)
 	}
@@ -305,7 +305,7 @@ func TestListTasks_ReadsFields(t *testing.T) {
 		{pageID: "nullable_fields_null", name: "No project or order"},
 	})
 
-	got, _, err := st.ListTasks(t.Context(), 100, true)
+	got, _, err := st.ListTasks(t.Context(), 100, true, nil)
 	if err != nil {
 		t.Fatalf("ListTasks() want nil error, got %v", err)
 	}
@@ -498,7 +498,7 @@ func TestListTasks_Project(t *testing.T) {
 			insertListProjects(t, st, tc.projects)
 			insertListTasks(t, st, []listTask{{pageID: "task1", name: "Write tests", project: tc.project}})
 
-			got, _, err := st.ListTasks(t.Context(), NoLimit, false)
+			got, _, err := st.ListTasks(t.Context(), NoLimit, false, nil)
 			if err != nil {
 				t.Fatalf("ListTasks() want nil error, got %v", err)
 			}
@@ -525,7 +525,7 @@ func TestListTasks_GoneProjectKeepsTasks(t *testing.T) {
 		{pageID: "c", name: "No project", order: ptr(3.0)},
 	})
 
-	got, truncated, err := st.ListTasks(t.Context(), 2, false)
+	got, truncated, err := st.ListTasks(t.Context(), 2, false, nil)
 	if err != nil {
 		t.Fatalf("ListTasks() want nil error, got %v", err)
 	}
@@ -535,5 +535,144 @@ func TestListTasks_GoneProjectKeepsTasks(t *testing.T) {
 	}
 	if !truncated {
 		t.Error("truncated = false, want true: a third task matched")
+	}
+}
+
+// setDefaultProject sets the test context's default project, or clears it if pageID is nil
+func setDefaultProject(t *testing.T, st *Store, pageID *string) {
+	t.Helper()
+
+	_, err := st.connectionPool.ExecContext(t.Context(), `UPDATE contexts SET default_project_page_id = ? WHERE id = ?`, pageID, testContextID)
+	if err != nil {
+		t.Fatalf("set default project failed: %v", err)
+	}
+}
+
+func TestListTasks_ProjectFilter(t *testing.T) {
+	// Tasks are listed by order, so want lists are in that order
+	tasks := []listTask{
+		{pageID: "p1_open", name: "P1 open", project: ptr("project1"), order: ptr(1.0)},
+		{pageID: "p1_done", name: "P1 done", project: ptr("project1"), order: ptr(2.0), done: true},
+		{pageID: "p2_open", name: "P2 open", project: ptr("project2"), order: ptr(3.0)},
+		{pageID: "p3_open", name: "P3 open", project: ptr("project3"), order: ptr(4.0)},
+		{pageID: "none_open", name: "No project", order: ptr(5.0)},
+		{pageID: "p1_gone", name: "P1 gone", project: ptr("project1"), order: ptr(6.0), gone: true},
+	}
+	// project3 isn't cached, and project2 is gone, to show the filter uses the task's own project ID
+	projects := []listProject{
+		{pageID: "project1", name: "Sabbatical"},
+		{pageID: "project2", name: "Old", gone: true},
+	}
+
+	tests := []struct {
+		name           string
+		defaultProject *string
+		filter         *string
+		all            bool
+		want           []string
+	}{
+		{
+			name: "no filter and no default lists every project",
+			want: []string{"p1_open", "p2_open", "p3_open", "none_open"},
+		},
+		{
+			name:   "filter lists only that project",
+			filter: ptr("project1"),
+			want:   []string{"p1_open"},
+		},
+		{
+			name:           "default project used without a filter",
+			defaultProject: ptr("project1"),
+			want:           []string{"p1_open"},
+		},
+		{
+			name:           "filter overrides the default project",
+			defaultProject: ptr("project1"),
+			filter:         ptr("project2"),
+			want:           []string{"p2_open"},
+		},
+		{
+			name:   "all adds the project's done tasks",
+			filter: ptr("project1"),
+			all:    true,
+			want:   []string{"p1_open", "p1_done"},
+		},
+		// Edge cases
+		{
+			name:   "project with no tasks lists nothing",
+			filter: ptr("project4"),
+			want:   []string{},
+		},
+		{
+			name:   "filter by a project that isn't cached",
+			filter: ptr("project3"),
+			want:   []string{"p3_open"},
+		},
+		{
+			name:           "default project that isn't cached",
+			defaultProject: ptr("project3"),
+			want:           []string{"p3_open"},
+		},
+		{
+			name:           "default project that's gone",
+			defaultProject: ptr("project2"),
+			want:           []string{"p2_open"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListProjects(t, st, projects)
+			insertListTasks(t, st, tasks)
+			setDefaultProject(t, st, tc.defaultProject)
+
+			got, _, err := st.ListTasks(t.Context(), NoLimit, tc.all, tc.filter)
+			if err != nil {
+				t.Fatalf("ListTasks() want nil error, got %v", err)
+			}
+
+			if ids := listedPageIDs(got); !slices.Equal(ids, tc.want) {
+				t.Errorf("ListTasks() = %q, want %q", ids, tc.want)
+			}
+		})
+	}
+}
+
+// truncated counts only the tasks the project filter lets through
+func TestListTasks_ProjectFilter_Limit(t *testing.T) {
+	tests := []struct {
+		name          string
+		limit         int
+		want          []string
+		wantTruncated bool
+	}{
+		{"more in the project", 1, []string{"p1_a"}, true},
+		// Other projects' tasks don't count as more
+		{"exactly the project's tasks", 2, []string{"p1_a", "p1_b"}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListTasks(t, st, []listTask{
+				{pageID: "p1_a", name: "A", project: ptr("project1"), order: ptr(1.0)},
+				{pageID: "p2_a", name: "B", project: ptr("project2"), order: ptr(2.0)},
+				{pageID: "p1_b", name: "C", project: ptr("project1"), order: ptr(3.0)},
+				{pageID: "p2_b", name: "D", project: ptr("project2"), order: ptr(4.0)},
+			})
+
+			got, truncated, err := st.ListTasks(t.Context(), tc.limit, false, ptr("project1"))
+			if err != nil {
+				t.Fatalf("ListTasks() want nil error, got %v", err)
+			}
+
+			if ids := listedPageIDs(got); !slices.Equal(ids, tc.want) {
+				t.Errorf("ListTasks() = %q, want %q", ids, tc.want)
+			}
+			if truncated != tc.wantTruncated {
+				t.Errorf("truncated = %v, want %v", truncated, tc.wantTruncated)
+			}
+		})
 	}
 }

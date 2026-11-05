@@ -75,7 +75,7 @@ func handleErrorResponse(res *http.Response, b []byte) error {
 	case http.StatusBadRequest:
 		return &clierr.Error{Code: clierr.Usage, Message: fmt.Sprintf("rejected request by Notion%v", messageDetailSuffix)}
 	case http.StatusUnauthorized:
-		return &clierr.Error{Code: clierr.AccessDenied, Message: fmt.Sprintf("Invalid Notion API key%v", messageDetailSuffix)}
+		return &clierr.Error{Code: clierr.AccessDenied, Message: fmt.Sprintf("invalid Notion API key%v", messageDetailSuffix)}
 	case http.StatusNotFound:
 		return &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}
 	case http.StatusTooManyRequests:
@@ -143,4 +143,51 @@ func dataSourcePageRequest(ctx context.Context, url, startCursor, apiVersion, ap
 	}
 
 	return qr.Results, qr.NextCursor, qr.HasMore, nil
+}
+
+func (c *Client) LookupDataSourceID(ctx context.Context, databaseID string) (*string, error) {
+	type dataSource struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	type database struct {
+		ID          string       `json:"id"`
+		DataSources []dataSource `json:"data_sources"`
+	}
+
+	url := fmt.Sprintf("%s/databases/%s", c.baseURL, databaseID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+	addDefaultHeaders(req, c.apiVersion, c.apiToken)
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
+	}
+	defer res.Body.Close()
+
+	bytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+	}
+
+	err = handleErrorResponse(res, bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	var dbResult database
+	err = json.Unmarshal(bytes, &dbResult)
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	}
+
+	if len(dbResult.DataSources) == 0 {
+		return nil, &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("no data source found for database, %q", databaseID)}
+	}
+
+	return &dbResult.DataSources[0].ID, nil
 }

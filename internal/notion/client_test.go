@@ -534,3 +534,314 @@ func TestQueryDataSource_Unreachable_ReturnsOffline(t *testing.T) {
 		})
 	}
 }
+
+func TestLookupDataSourceID_ReturnsDataSourceID(t *testing.T) {
+	const want = "ds-1"
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseBody := `{
+			"object": "database",
+			"id": "db-1",
+			"data_sources": [{"id": "ds-1", "name": "Tasks"}]
+		}`
+
+		if _, err := w.Write([]byte(responseBody)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, "test-token", s.Client())
+
+	got, err := nc.LookupDataSourceID(t.Context(), "db-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got == nil {
+		t.Fatalf("got nil, want %q", want)
+	}
+
+	if *got != want {
+		t.Errorf("got %q, want %q", *got, want)
+	}
+}
+
+func TestLookupDataSourceID_RequestShape(t *testing.T) {
+	const (
+		databaseID = "db-123"
+		token      = "test-token"
+	)
+
+	// Values come from DESIGN.md (§5 and Constraints) and the Notion API, not from
+	// the client's own constants, so a change to either is caught here.
+	wantPath := "/databases/" + databaseID
+	wantHeaders := map[string]string{
+		"Authorization":  "Bearer " + token,
+		"Notion-Version": "2026-03-11",
+	}
+
+	var requests atomic.Int32
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %q, want %q", r.Method, http.MethodGet)
+		}
+
+		if r.URL.Path != wantPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, wantPath)
+		}
+
+		for name, want := range wantHeaders {
+			if got := r.Header.Get(name); got != want {
+				t.Errorf("header %s = %q, want %q", name, got, want)
+			}
+		}
+
+		if _, err := w.Write([]byte(`{"object": "database", "data_sources": [{"id": "ds-1"}]}`)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, token, s.Client())
+
+	if _, err := nc.LookupDataSourceID(t.Context(), databaseID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Errorf("unexpected request count. Got %d, want 1", got)
+	}
+}
+
+func TestLookupDataSourceID_ErrorResponse_ReturnsCLIError(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantCode clierr.ErrorCode
+	}{
+		{
+			name:     "bad request",
+			status:   http.StatusBadRequest,
+			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "path failed validation"}`,
+			wantCode: clierr.Usage,
+		},
+		{
+			name:     "invalid token",
+			status:   http.StatusUnauthorized,
+			body:     `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`,
+			wantCode: clierr.AccessDenied,
+		},
+		{
+			// What Notion returns for a database that isn't shared with the integration, too
+			name:     "not found",
+			status:   http.StatusNotFound,
+			body:     `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find database."}`,
+			wantCode: clierr.NotFound,
+		},
+		{
+			name:     "server error",
+			status:   http.StatusInternalServerError,
+			body:     `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`,
+			wantCode: clierr.Internal,
+		},
+		// Edge cases
+		{
+			name:     "unmapped status",
+			status:   http.StatusServiceUnavailable,
+			body:     `{"object": "error", "status": 503, "code": "service_unavailable", "message": "Notion is unavailable."}`,
+			wantCode: clierr.Internal,
+		},
+		{
+			name:     "body is not JSON",
+			status:   http.StatusBadGateway,
+			body:     `<html><body>502 Bad Gateway</body></html>`,
+			wantCode: clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			got, err := nc.LookupDataSourceID(t.Context(), "db-1")
+			if err == nil {
+				t.Fatalf("expected an error for HTTP %d, got nil", tc.status)
+			}
+
+			if got != nil {
+				t.Errorf("expected no ID alongside an error, got %q", *got)
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != tc.wantCode {
+				t.Errorf("error code = %q, want %q", ce.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestLookupDataSourceID_NoDataSources_ReturnsNotFound(t *testing.T) {
+	const databaseID = "db-123"
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty list", body: `{"object": "database", "id": "db-123", "data_sources": []}`},
+		// Edge cases
+		{name: "null list", body: `{"object": "database", "id": "db-123", "data_sources": null}`},
+		{name: "missing key", body: `{"object": "database", "id": "db-123"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			got, err := nc.LookupDataSourceID(t.Context(), databaseID)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+
+			if got != nil {
+				t.Errorf("expected no ID alongside an error, got %q", *got)
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != clierr.NotFound {
+				t.Errorf("error code = %q, want %q", ce.Code, clierr.NotFound)
+			}
+
+			// The message has to say which of the two databases has the problem
+			if !strings.Contains(ce.Message, databaseID) {
+				t.Errorf("message = %q, want it to include %q", ce.Message, databaseID)
+			}
+		})
+	}
+}
+
+func TestLookupDataSourceID_InvalidJSON_ReturnsInternal(t *testing.T) {
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := w.Write([]byte(`<html><body>not JSON</body></html>`)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, "test-token", s.Client())
+
+	got, err := nc.LookupDataSourceID(t.Context(), "db-1")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+
+	if got != nil {
+		t.Errorf("expected no ID alongside an error, got %q", *got)
+	}
+
+	var ce *clierr.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("error %v is not a *clierr.Error", err)
+	}
+
+	if ce.Code != clierr.Internal {
+		t.Errorf("error code = %q, want %q", ce.Code, clierr.Internal)
+	}
+}
+
+// When Notion can't be reached there's no HTTP status to map, so the error is offline (DESIGN.md §8)
+func TestLookupDataSourceID_Unreachable_ReturnsOffline(t *testing.T) {
+	const token = "secret-test-token"
+
+	tests := []struct {
+		name      string
+		newClient func(t *testing.T) *Client
+	}{
+		{
+			name: "server not listening",
+			newClient: func(t *testing.T) *Client {
+				// See TestQueryDataSource_Unreachable_ReturnsOffline for why this needs NewServer
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("unexpected request to a closed server: %s %s", r.Method, r.URL.Path)
+				}))
+				nc := NewClient(s.URL, token, s.Client())
+
+				s.Close()
+
+				return nc
+			},
+		},
+		{
+			name: "request times out",
+			newClient: func(t *testing.T) *Client {
+				// See TestQueryDataSource_Unreachable_ReturnsOffline for the order of these cleanups
+				release := make(chan struct{})
+				s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					<-release
+				}))
+				t.Cleanup(func() { close(release) })
+
+				httpClient := s.Client()
+				httpClient.Timeout = 50 * time.Millisecond
+
+				return NewClient(s.URL, token, httpClient)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nc := tc.newClient(t)
+
+			got, err := nc.LookupDataSourceID(t.Context(), "db-1")
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+
+			if got != nil {
+				t.Errorf("expected no ID alongside an error, got %q", *got)
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != clierr.Offline {
+				t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+			}
+
+			// The cause is printed with the error, so it must never carry the token (DESIGN.md §9)
+			if strings.Contains(err.Error(), token) || (ce.Cause != nil && strings.Contains(ce.Cause.Error(), token)) {
+				t.Errorf("error includes the token: %v", err)
+			}
+		})
+	}
+}

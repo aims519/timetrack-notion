@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -405,5 +406,146 @@ func checkGoneCount(t *testing.T, got, want *int) {
 		t.Errorf("gone count = nil, want %d", *want)
 	case want != nil && *got != *want:
 		t.Errorf("gone count = %d, want %d", *got, *want)
+	}
+}
+
+func TestProjectsByName(t *testing.T) {
+	tests := []struct {
+		name     string
+		projects []listProject
+		search   string
+		want     []string // page IDs, in any order
+	}{
+		{
+			name:     "exact match",
+			projects: []listProject{{pageID: "p1", name: "Sabbatical"}, {pageID: "p2", name: "Tracker"}},
+			search:   "Sabbatical",
+			want:     []string{"p1"},
+		},
+		{
+			name:     "ignores case",
+			projects: []listProject{{pageID: "p1", name: "Sabbatical"}},
+			search:   "sABBATICAL",
+			want:     []string{"p1"},
+		},
+		{
+			name:     "no match",
+			projects: []listProject{{pageID: "p1", name: "Sabbatical"}},
+			search:   "Tracker",
+			want:     nil,
+		},
+		{
+			name:     "every project with the name",
+			projects: []listProject{{pageID: "p1", name: "Admin"}, {pageID: "p2", name: "admin"}, {pageID: "p3", name: "Other"}},
+			search:   "ADMIN",
+			want:     []string{"p1", "p2"},
+		},
+		// Edge cases
+		{
+			name:     "part of a name doesn't match",
+			projects: []listProject{{pageID: "p1", name: "Sabbatical"}},
+			search:   "Sabb",
+			want:     nil,
+		},
+		{
+			name:     "gone project doesn't match",
+			projects: []listProject{{pageID: "p1", name: "Sabbatical", gone: true}},
+			search:   "Sabbatical",
+			want:     nil,
+		},
+		{
+			// A deleted project with the same name doesn't make a live one ambiguous
+			name:     "gone project with the same name is left out",
+			projects: []listProject{{pageID: "p1", name: "Sabbatical", gone: true}, {pageID: "p2", name: "Sabbatical"}},
+			search:   "Sabbatical",
+			want:     []string{"p2"},
+		},
+		{
+			name:     "project in another context doesn't match",
+			projects: []listProject{{contextID: otherContextID, pageID: "p1", name: "Sabbatical"}},
+			search:   "Sabbatical",
+			want:     nil,
+		},
+		{
+			name:   "empty cache",
+			search: "Sabbatical",
+			want:   nil,
+		},
+		{
+			// COLLATE NOCASE folds ASCII letters only
+			name:     "case outside ASCII isn't ignored",
+			projects: []listProject{{pageID: "p1", name: "Café"}},
+			search:   "CAFÉ",
+			want:     nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertOtherContext(t, st)
+			insertListProjects(t, st, tc.projects)
+
+			got, err := st.ProjectsByName(t.Context(), tc.search)
+			if err != nil {
+				t.Fatalf("ProjectsByName(%q) want nil error, got %v", tc.search, err)
+			}
+
+			ids := make([]string, len(got))
+			for i, p := range got {
+				ids[i] = p.PageID
+			}
+			slices.Sort(ids)
+			if len(ids) != len(tc.want) || !slices.Equal(ids, tc.want) {
+				t.Errorf("ProjectsByName(%q) page IDs = %q, want %q", tc.search, ids, tc.want)
+			}
+		})
+	}
+}
+
+func TestProjectsByName_ReadsFields(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	insertListProjects(t, st, []listProject{{pageID: "p1", name: "Sabbatical"}})
+
+	got, err := st.ProjectsByName(t.Context(), "Sabbatical")
+	if err != nil {
+		t.Fatalf("ProjectsByName() want nil error, got %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ProjectsByName() returned %d projects, want 1", len(got))
+	}
+
+	want := Project{ContextID: testContextID, PageID: "p1", Name: "Sabbatical", GoneAt: nil}
+	if got[0].ContextID != want.ContextID || got[0].PageID != want.PageID || got[0].Name != want.Name {
+		t.Errorf("ProjectsByName() = %+v, want %+v", got[0], want)
+	}
+	if got[0].GoneAt != nil {
+		t.Errorf("GoneAt = %v, want nil", *got[0].GoneAt)
+	}
+}
+
+// Matches come back sorted by name, so ambiguous_selector candidates are in a stable order.
+// Inserted in the opposite order, so a result in insertion order fails
+func TestProjectsByName_OrderedByName(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	insertListProjects(t, st, []listProject{
+		{pageID: "p1", name: "admin"},
+		{pageID: "p2", name: "Admin"},
+		{pageID: "p3", name: "ADMIN"},
+	})
+
+	got, err := st.ProjectsByName(t.Context(), "admin")
+	if err != nil {
+		t.Fatalf("ProjectsByName() want nil error, got %v", err)
+	}
+
+	names := make([]string, len(got))
+	for i, p := range got {
+		names[i] = p.Name
+	}
+	// ORDER BY name compares bytes, so upper case sorts first
+	want := []string{"ADMIN", "Admin", "admin"}
+	if !slices.Equal(names, want) {
+		t.Errorf("ProjectsByName() names = %q, want %q", names, want)
 	}
 }

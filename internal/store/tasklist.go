@@ -12,7 +12,7 @@ const NoLimit = 0
 // ListTasks returns all cached Notion tasks from the database subject to
 //   - limit: only return the top n results
 //   - all: include tasks marked as done in the results
-func (s *Store) ListTasks(ctx context.Context, limit int, all bool) (tasks []Task, truncated bool, err error) {
+func (s *Store) ListTasks(ctx context.Context, limit int, all bool, projectID *string) (tasks []Task, truncated bool, err error) {
 	var queryLimit int
 	if limit == NoLimit {
 		queryLimit = -1
@@ -35,12 +35,13 @@ func (s *Store) ListTasks(ctx context.Context, limit int, all bool) (tasks []Tas
 		LEFT JOIN projects ON tasks.project_page_id = projects.page_id
 			AND projects.context_id = tasks.context_id
 			AND projects.gone_at IS NULL
-		WHERE contexts.id = ?
-		AND (? OR tasks.done = 0)
+		WHERE contexts.id = ?1
+		AND (?2 OR tasks.done = 0)
 		AND tasks.gone_at IS NULL
+		AND (COALESCE(?3, contexts.default_project_page_id) IS NULL OR tasks.project_page_id = COALESCE(?3, contexts.default_project_page_id))
 		ORDER BY sort_order NULLS LAST, tasks.name COLLATE NOCASE
-		LIMIT ?
-	`, DefaultContextID, all, queryLimit)
+		LIMIT ?4
+	`, DefaultContextID, all, projectID, queryLimit)
 	if err != nil {
 		return nil, false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached tasks: " + err.Error(), Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}
@@ -51,6 +52,7 @@ func (s *Store) ListTasks(ctx context.Context, limit int, all bool) (tasks []Tas
 			truncated = true // more rows exist but omitted
 			break
 		}
+
 		t, err := scanTask(rows)
 		if err != nil {
 			return nil, false, err

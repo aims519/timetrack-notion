@@ -310,6 +310,7 @@ func TestRun_TaskList_Errors(t *testing.T) {
 		// --limit must be at least 1 (DESIGN.md §8)
 		{"limit_zero", []string{"task", "list", "--limit", "0"}, 2, clierr.Usage},
 		{"limit_negative", []string{"task", "list", "--limit", "-1"}, 2, clierr.Usage},
+		{"project_empty", []string{"task", "list", "--project", ""}, 2, clierr.Usage},
 	}
 
 	for _, tc := range tests {
@@ -444,6 +445,218 @@ func TestRun_TaskList_Project(t *testing.T) {
 			}
 			if !reflect.DeepEqual(gotValue, wantValue) {
 				t.Errorf("project = %s, want %s", raw, tc.want)
+			}
+		})
+	}
+}
+
+const (
+	filterSabbaticalProject = "cccccccccccccccccccccccccccccc01"
+	filterTrackerProject    = "cccccccccccccccccccccccccccccc02"
+	filterAdminProject      = "cccccccccccccccccccccccccccccc03"
+	filterAdminLowerProject = "cccccccccccccccccccccccccccccc04"
+	filterDeletedProject    = "cccccccccccccccccccccccccccccc05"
+
+	filterSabbaticalTask = "dddddddddddddddddddddddddddddd01"
+	filterTrackerTask    = "dddddddddddddddddddddddddddddd02"
+	filterAdminTask      = "dddddddddddddddddddddddddddddd03"
+	filterNoProjectTask  = "dddddddddddddddddddddddddddddd04"
+)
+
+// seedProjectFilter caches one open task in each of Sabbatical, Tracker and Admin, and one with
+// no project. "Admin" and "admin" are two projects, and "Deleted" is gone. defaultProject is the
+// context's default project, or nil for none
+func seedProjectFilter(t *testing.T, dbPath string, defaultProject *string) {
+	t.Helper()
+
+	st, err := store.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open(%q): %v", dbPath, err)
+	}
+	defer func() { _ = st.Close() }()
+
+	refreshed := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
+	project := func(id, name string) store.Project {
+		return store.Project{ContextID: store.DefaultContextID, PageID: id, Name: name}
+	}
+	task := func(id string, project *string, order float64) store.Task {
+		return store.Task{ContextID: store.DefaultContextID, PageID: id, Name: "Task " + id[len(id)-2:], ProjectPageID: project, SortOrder: ptr(order), LastEditedTime: refreshed}
+	}
+	live := []store.Project{
+		project(filterSabbaticalProject, "Sabbatical"),
+		project(filterTrackerProject, "Tracker"),
+		project(filterAdminProject, "Admin"),
+		project(filterAdminLowerProject, "admin"),
+	}
+
+	// The second projects refresh leaves out "Deleted", so it's marked gone
+	if _, err := st.RefreshProjects(context.Background(), append(slices.Clone(live), project(filterDeletedProject, "Deleted")), refreshed); err != nil {
+		t.Fatalf("first RefreshProjects(): %v", err)
+	}
+	if _, err := st.RefreshProjects(context.Background(), live, refreshed.Add(time.Hour)); err != nil {
+		t.Fatalf("second RefreshProjects(): %v", err)
+	}
+	if _, err := st.RefreshTasks(context.Background(), []store.Task{
+		task(filterSabbaticalTask, ptr(filterSabbaticalProject), 1),
+		task(filterTrackerTask, ptr(filterTrackerProject), 2),
+		task(filterAdminTask, ptr(filterAdminProject), 3),
+		task(filterNoProjectTask, nil, 4),
+	}, refreshed, true); err != nil {
+		t.Fatalf("RefreshTasks(): %v", err)
+	}
+
+	nc, err := st.NotionContext(context.Background(), store.DefaultContextID)
+	if err != nil {
+		t.Fatalf("NotionContext(): %v", err)
+	}
+	nc.DefaultProjectPageID = defaultProject
+	if err := st.SaveNotionContext(context.Background(), nc); err != nil {
+		t.Fatalf("SaveNotionContext(): %v", err)
+	}
+}
+
+func TestRun_TaskList_ProjectFilter(t *testing.T) {
+	tests := []struct {
+		name           string
+		defaultProject *string
+		args           []string
+		want           []string // page IDs, in list order
+	}{
+		{
+			name: "no flag and no default lists every project",
+			want: []string{filterSabbaticalTask, filterTrackerTask, filterAdminTask, filterNoProjectTask},
+		},
+		{
+			name: "project flag",
+			args: []string{"--project", "Sabbatical"},
+			want: []string{filterSabbaticalTask},
+		},
+		{
+			name: "project flag ignores case",
+			args: []string{"--project", "tRACKER"},
+			want: []string{filterTrackerTask},
+		},
+		{
+			name:           "default project without the flag",
+			defaultProject: ptr(filterSabbaticalProject),
+			want:           []string{filterSabbaticalTask},
+		},
+		{
+			name:           "project flag overrides the default project",
+			defaultProject: ptr(filterSabbaticalProject),
+			args:           []string{"--project", "Tracker"},
+			want:           []string{filterTrackerTask},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			t.Setenv("TT_DB", dbPath)
+			seedProjectFilter(t, dbPath, tc.defaultProject)
+
+			args := append([]string{"task", "list"}, tc.args...)
+			code, stdout, stderr := runTT(t, args...)
+			if code != 0 {
+				t.Fatalf("Run(%v) = %d, want 0 (stderr: %q)", args, code, stderr)
+			}
+
+			var got taskListOutput
+			if err := json.Unmarshal(stdout, &got); err != nil {
+				t.Fatalf("unable to decode task list document %q: %v", stdout, err)
+			}
+
+			ids := make([]string, len(got.Tasks))
+			for i, task := range got.Tasks {
+				ids[i] = task.PageID
+			}
+			if !slices.Equal(ids, tc.want) {
+				t.Errorf("page IDs = %v, want %v", ids, tc.want)
+			}
+		})
+	}
+}
+
+func TestRun_TaskList_ProjectFilter_Errors(t *testing.T) {
+	type candidate struct {
+		PageID string `json:"page_id"`
+		Name   string `json:"name"`
+	}
+
+	tests := []struct {
+		name           string
+		project        string
+		wantCode       clierr.ErrorCode
+		wantCandidates []candidate // in the order given, by name; nil for not_found
+	}{
+		{
+			name:     "no project with the name",
+			project:  "Holiday",
+			wantCode: clierr.NotFound,
+		},
+		{
+			// Ignoring case, "admin" matches both "Admin" and "admin"
+			name:     "several projects with the name",
+			project:  "ADMIN",
+			wantCode: clierr.AmbiguousSelector,
+			wantCandidates: []candidate{
+				{filterAdminProject, "Admin"},
+				{filterAdminLowerProject, "admin"},
+			},
+		},
+		// Edge cases
+		{
+			name:     "gone project",
+			project:  "Deleted",
+			wantCode: clierr.NotFound,
+		},
+		{
+			name:     "part of a name",
+			project:  "Sabb",
+			wantCode: clierr.NotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			t.Setenv("TT_DB", dbPath)
+			seedProjectFilter(t, dbPath, nil)
+
+			code, stdout, stderr := runTT(t, "task", "list", "--project", tc.project)
+			if code != 3 {
+				t.Errorf("Run() = %d, want 3 (stderr: %q)", code, stderr)
+			}
+			if len(stdout) != 0 {
+				t.Errorf("Run() wrote to stdout on failure: %q", stdout)
+			}
+
+			var doc struct {
+				Error struct {
+					Code    string `json:"code"`
+					Details struct {
+						Selector   *string     `json:"selector"`
+						Candidates []candidate `json:"candidates"`
+					} `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(stderr, &doc); err != nil {
+				t.Fatalf("unable to decode error document %q: %v", stderr, err)
+			}
+
+			if doc.Error.Code != string(tc.wantCode) {
+				t.Errorf("error code = %q, want %q", doc.Error.Code, tc.wantCode)
+			}
+			// The selector is the name as given, not as the project spells it
+			if doc.Error.Details.Selector == nil {
+				t.Errorf("details.selector missing, want %q", tc.project)
+			} else if *doc.Error.Details.Selector != tc.project {
+				t.Errorf("details.selector = %q, want %q", *doc.Error.Details.Selector, tc.project)
+			}
+
+			gotCandidates := doc.Error.Details.Candidates
+			if !slices.Equal(gotCandidates, tc.wantCandidates) {
+				t.Errorf("details.candidates = %+v, want %+v", gotCandidates, tc.wantCandidates)
 			}
 		})
 	}

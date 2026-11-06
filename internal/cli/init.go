@@ -10,6 +10,7 @@ import (
 	"github.com/aims519/timetrack-notion/internal/notion"
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
+	"github.com/aims519/timetrack-notion/internal/taskcache"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 	"github.com/spf13/cobra"
 )
@@ -93,9 +94,36 @@ func newInitCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			// TODO Run refresh
+			// Refresh cache (full)
+			clock := refreshClock{}
+			_, err = taskcache.Refresh(cmd.Context(), &clock, a.db, notionClient, resolvedTasksDataSourceID, resolvedProjectsDataSourceID, true, taskProps)
+			if err != nil {
+				return err
+			}
 
-			// TODO Look up project name from cache
+			// Attempt to resolve project name from updated cache
+			var defaultProjectID *string
+			if cmd.Flag("project").Changed {
+				matches, err := a.db.ProjectsByName(cmd.Context(), projectName)
+				if err != nil {
+					return err
+				}
+
+				if len(matches) == 0 {
+					return &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("no project found that matches %q", projectName), Details: map[string]any{"selector": projectName}}
+				}
+
+				if len(matches) > 1 {
+					refs := make([]output.ProjectRef, len(matches))
+					for i, v := range matches {
+						refs[i] = output.ProjectRef{PageID: v.PageID, Name: v.Name}
+					}
+
+					return &clierr.Error{Code: clierr.AmbiguousSelector, Message: fmt.Sprintf("more than one project matches %q", projectName), Details: map[string]any{"selector": projectName, "candidates": refs}}
+				}
+
+				defaultProjectID = &matches[0].PageID
+			}
 
 			// TODO Create time entries database
 
@@ -103,6 +131,7 @@ func newInitCmd(a *app) *cobra.Command {
 			updatedContext := mergeNotionContextChanges(&currentNotionContext,
 				&resolvedProjectsDataSourceID,
 				&resolvedTasksDataSourceID,
+				defaultProjectID,
 				taskProps)
 			err = a.db.SaveNotionContext(cmd.Context(), currentNotionContext)
 			if err != nil {
@@ -115,6 +144,8 @@ func newInitCmd(a *app) *cobra.Command {
 				TasksDataSourceID:    updatedContext.TasksDataSourceID,
 				ProjectsDataSourceID: updatedContext.ProjectsDataSourceID,
 				EntriesDataSourceID:  updatedContext.EntriesDataSourceID,
+				DefaultProjectPageID: updatedContext.DefaultProjectPageID,
+				PropertyMap:          updatedContext.PropertyMap,
 			}, allWarnings)
 			return output.Write(cmd.OutOrStdout(), cmd.ErrOrStderr(), *a.format, doc, loc)
 		},
@@ -127,12 +158,20 @@ func newInitCmd(a *app) *cobra.Command {
 	return initCmd
 }
 
-func mergeNotionContextChanges(nc *store.NotionContext, projectsDataSourceID, tasksDataSourceID *string, tasksPropertyMappings map[string]string) store.NotionContext {
+func mergeNotionContextChanges(nc *store.NotionContext, projectsDataSourceID, tasksDataSourceID, defaultProjectPageID *string, tasksPropertyMappings map[string]string) store.NotionContext {
 	nc.TasksDataSourceID = tasksDataSourceID
+
+	// project data source changed if old and new are not nill, and values differ
+	projectsDSUpdated := nc.ProjectsDataSourceID != nil && projectsDataSourceID != nil && *nc.ProjectsDataSourceID != *projectsDataSourceID
 	nc.ProjectsDataSourceID = projectsDataSourceID
 
 	// Property map always replaced fully
 	nc.PropertyMap = tasksPropertyMappings
+
+	// Only overwrite project page ID if value present or if projects data source has changed
+	if defaultProjectPageID != nil || projectsDSUpdated {
+		nc.DefaultProjectPageID = defaultProjectPageID
+	}
 
 	return *nc
 }
@@ -146,7 +185,7 @@ func mapTaskProperties(ctx context.Context, nc *notion.Client, tasksDataSourceID
 	}
 
 	warnings := []output.Warning{}
-	keys := []string{"task", "project", "order", "done"}
+	keys := []string{"project", "order", "done"}
 	results := map[string]string{}
 
 	for _, k := range keys {

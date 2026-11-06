@@ -37,6 +37,9 @@ const (
 
 	entriesDataSourceID   = "entries-ds"
 	entriesDataSourcePath = "/data_sources/" + entriesDataSourceID
+
+	// Where init checks the token. Sorts after every other path, so it's last in fakeNotion's report
+	usersMePath = "/users/me"
 )
 
 type notionResponse struct {
@@ -47,6 +50,7 @@ type notionResponse struct {
 var (
 	databaseFound   = notionResponse{http.StatusOK, `{"object": "database", "data_sources": [{"id": "ds-1", "name": "Data source"}]}`}
 	databaseCreated = notionResponse{http.StatusOK, fmt.Sprintf(`{"object": "database", "id": "entries-db", "data_sources": [{"id": %q, "name": "Time entries"}]}`, entriesDataSourceID)}
+	tokenValid      = notionResponse{http.StatusOK, `{"object": "user", "id": "bot-1", "name": "tt", "type": "bot", "bot": {}}`}
 )
 
 // withParentPage is args plus --parent-page, for tests where init gets as far as needing it but
@@ -67,8 +71,9 @@ func requestCount(paths []string, path string) int {
 }
 
 // fakeNotion answers each path from responses, and checks every request carries the token from
-// NOTION_TOKEN. The returned function gives the paths requested, sorted, so a test doesn't depend
-// on which database is looked up first
+// NOTION_TOKEN. The token check succeeds unless responses says otherwise, because init makes it on
+// every run. The returned function gives the paths requested, including the token check, sorted so
+// a test doesn't depend on which database is looked up first
 func fakeNotion(t *testing.T, responses map[string]notionResponse) (*httptest.Server, func() []string) {
 	t.Helper()
 
@@ -86,6 +91,9 @@ func fakeNotion(t *testing.T, responses map[string]notionResponse) (*httptest.Se
 		}
 
 		res, ok := responses[r.URL.Path]
+		if !ok && r.URL.Path == usersMePath {
+			res, ok = tokenValid, true
+		}
 		if !ok {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -426,6 +434,76 @@ func TestRun_Init_NotionUnreachable_ReturnsOffline(t *testing.T) {
 	}
 }
 
+// The token is checked first, so a failed check looks nothing up in Notion and leaves everything
+// stored as it was, even with every flag given (DESIGN.md §5)
+func TestRun_Init_TokenCheckFails_StopsBeforeLookups(t *testing.T) {
+	unauthorized := notionResponse{http.StatusUnauthorized, `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`}
+	serverError := notionResponse{http.StatusInternalServerError, `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`}
+
+	tests := []struct {
+		name        string
+		response    notionResponse
+		storedTasks string
+		storedProj  string
+		wantExit    int
+		wantCode    clierr.ErrorCode
+	}{
+		{
+			name:     "invalid_token_nothing_stored",
+			response: unauthorized,
+			wantExit: 5,
+			wantCode: clierr.AccessDenied,
+		},
+		{
+			name:        "invalid_token_already_connected",
+			response:    unauthorized,
+			storedTasks: "old-tasks-ds",
+			storedProj:  "old-projects-ds",
+			wantExit:    5,
+			wantCode:    clierr.AccessDenied,
+		},
+		// Edge cases
+		{
+			// Not a verdict on the token, but init still can't go on
+			name:     "server_error",
+			response: serverError,
+			wantExit: 10,
+			wantCode: clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Any request past the token check fails the test as unexpected
+			s, requested := fakeNotion(t, map[string]notionResponse{usersMePath: tc.response})
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			seedDataSources(t, dbPath, tc.storedTasks, tc.storedProj)
+
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage("--tasks-db", tasksDatabaseID, "--projects-db", projectsDatabaseID)...)
+
+			checkInitError(t, exit, stdout, stderr, tc.wantExit, tc.wantCode)
+
+			want := []string{usersMePath}
+			if got := requested(); !slices.Equal(got, want) {
+				t.Errorf("paths requested = %v, want %v", got, want)
+			}
+
+			gotTasks, gotProjects := storedDataSources(t, dbPath)
+			if gotTasks != tc.storedTasks {
+				t.Errorf("stored tasks data source = %q, want %q", gotTasks, tc.storedTasks)
+			}
+			if gotProjects != tc.storedProj {
+				t.Errorf("stored projects data source = %q, want %q", gotProjects, tc.storedProj)
+			}
+			checkEntriesDataSource(t, dbPath, "")
+			if got := storedContext(t, dbPath).PropertyMap; got != nil {
+				t.Errorf("stored property map = %v, want none", got)
+			}
+			checkCacheStateUntouched(t, dbPath)
+		})
+	}
+}
+
 // Each data source is the one looked up if its database was given, otherwise the stored one, and
 // the result is what gets reported and saved (DESIGN.md §5)
 func TestRun_Init_ResolvesDataSources(t *testing.T) {
@@ -434,10 +512,11 @@ func TestRun_Init_ResolvesDataSources(t *testing.T) {
 	projectsQueryPath := "/data_sources/" + mapProjectsDataSourceID + "/query"
 	noPages := notionResponse{http.StatusOK, `{"object": "list", "results": [], "next_cursor": null, "has_more": false}`}
 
-	// Every run reads the tasks schema, refreshes both data sources and creates the entries
-	// database. These paths sort before the database lookups, which are added after them
+	// Every run checks the token, reads the tasks schema, refreshes both data sources and creates
+	// the entries database. Sorted, the database lookups fall between these and the token check
 	requestsWith := func(lookups ...string) []string {
-		return append([]string{projectsQueryPath, tasksDataSourcePath, tasksQueryPath, createDatabasePath}, lookups...)
+		requests := append([]string{projectsQueryPath, tasksDataSourcePath, tasksQueryPath, createDatabasePath}, lookups...)
+		return append(requests, usersMePath)
 	}
 
 	tests := []struct {
@@ -547,25 +626,28 @@ func TestRun_Init_DataSourceMissing_ReturnsNotInitialised(t *testing.T) {
 		wantRequests []string // sorted paths
 	}{
 		{
-			name: "nothing_given_nothing_stored",
+			name:         "nothing_given_nothing_stored",
+			wantRequests: []string{usersMePath},
 		},
 		{
 			name:         "tasks_given_nothing_stored",
 			args:         []string{"--tasks-db", tasksDatabaseID},
-			wantRequests: []string{tasksDatabasePath},
+			wantRequests: []string{tasksDatabasePath, usersMePath},
 		},
 		{
 			name:         "projects_given_nothing_stored",
 			args:         []string{"--projects-db", projectsDatabaseID},
-			wantRequests: []string{projectsDatabasePath},
+			wantRequests: []string{projectsDatabasePath, usersMePath},
 		},
 		{
-			name:        "only_tasks_stored",
-			storedTasks: mapTasksDataSourceID,
+			name:         "only_tasks_stored",
+			storedTasks:  mapTasksDataSourceID,
+			wantRequests: []string{usersMePath},
 		},
 		{
-			name:       "only_projects_stored",
-			storedProj: mapProjectsDataSourceID,
+			name:         "only_projects_stored",
+			storedProj:   mapProjectsDataSourceID,
+			wantRequests: []string{usersMePath},
 		},
 	}
 
@@ -1513,7 +1595,7 @@ func TestRun_Init_RequiredPropertyMissing(t *testing.T) {
 				t.Errorf("data_source_id = %q, want %q", doc.Error.Details.DataSourceID, mapTasksDataSourceID)
 			}
 
-			want := []string{"/data_sources/" + mapTasksDataSourceID}
+			want := []string{"/data_sources/" + mapTasksDataSourceID, usersMePath}
 			if got := requested(); !slices.Equal(got, want) {
 				t.Errorf("paths requested = %v, want %v", got, want)
 			}
@@ -1564,7 +1646,7 @@ func TestRun_Init_SeveralProjectRelations_ReturnsCandidates(t *testing.T) {
 		t.Errorf("candidates = %s, want %s", got, wantCandidates)
 	}
 
-	want := []string{"/data_sources/" + mapTasksDataSourceID}
+	want := []string{"/data_sources/" + mapTasksDataSourceID, usersMePath}
 	if got := requested(); !slices.Equal(got, want) {
 		t.Errorf("paths requested = %v, want %v", got, want)
 	}
@@ -1619,7 +1701,7 @@ func TestRun_Init_NoEntriesDatabaseNoParentPage_ReturnsNotInitialised(t *testing
 		t.Errorf("error doesn't mention --parent-page: %s", stderr)
 	}
 
-	want := []string{"/data_sources/" + mapTasksDataSourceID}
+	want := []string{"/data_sources/" + mapTasksDataSourceID, usersMePath}
 	if got := requested(); !slices.Equal(got, want) {
 		t.Errorf("paths requested = %v, want %v", got, want)
 	}
@@ -1748,6 +1830,94 @@ func TestRun_Init_ReportsWaitingEntries(t *testing.T) {
 				t.Errorf("waiting = %v (present: %v), want %v", got, ok, tc.want)
 			}
 		})
+	}
+}
+
+// storedEntries reads back the entries started in the last day, oldest first
+func storedEntries(t *testing.T, dbPath string) []store.Entry {
+	t.Helper()
+
+	now := time.Now()
+	var entries []store.Entry
+	onStore(t, dbPath, func(st *store.Store) {
+		status, err := st.ReadStatus(t.Context(), now.Add(-24*time.Hour), now.Add(24*time.Hour))
+		if err != nil {
+			t.Fatalf("ReadStatus(): %v", err)
+		}
+		entries = status.TodayEntries
+	})
+	return entries
+}
+
+// entriesJSON gives entries as text, because comparing them directly would compare the addresses
+// of their pointer fields, and a failure would print those addresses too
+func entriesJSON(t *testing.T, entries []store.Entry) string {
+	t.Helper()
+
+	b, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("encoding entries: %v", err)
+	}
+	return string(b)
+}
+
+// Connecting a context that's been used offline changes none of its entries: they stay as recorded,
+// with no task, and a running one keeps running (DESIGN.md §5)
+func TestRun_Init_EntriesRecordedBeforeInit_StayIntactAndUnattached(t *testing.T) {
+	s, _ := connectedNotion(t, fullTasksSchema())
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// The first entry is backdated so that the two can't start at the same moment
+	recorded := [][]string{{"start", "first", "--ago", "2h"}, {"stop"}, {"start", "second"}}
+	for _, args := range recorded {
+		exit, _, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), args...)
+		if exit != 0 {
+			t.Fatalf("%v: exit code = %d, want 0 (stderr: %q)", args, exit, stderr)
+		}
+	}
+	before := storedEntries(t, dbPath)
+
+	exit, _, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage("--tasks-db", tasksDatabaseID, "--projects-db", projectsDatabaseID)...)
+	if exit != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
+	}
+
+	after := storedEntries(t, dbPath)
+
+	// Every field, so a change to the times, sync state or updated_at is caught as well
+	if got, want := entriesJSON(t, after), entriesJSON(t, before); got != want {
+		t.Errorf("entries after init:\n got %s\nwant %s", got, want)
+	}
+
+	if len(after) != 2 {
+		t.Fatalf("got %d entries, want 2: %s", len(after), entriesJSON(t, after))
+	}
+
+	wantEntries := []struct {
+		description string
+		running     bool
+	}{
+		{description: "first", running: false},
+		{description: "second", running: true},
+	}
+	for i, want := range wantEntries {
+		e := after[i]
+
+		if e.Description == nil || *e.Description != want.description {
+			t.Errorf("entry %d description isn't %q: %s", i, want.description, entriesJSON(t, after))
+		}
+		if running := e.EndUTC == nil; running != want.running {
+			t.Errorf("entry %d running = %v, want %v", i, running, want.running)
+		}
+		if e.TaskPageID != nil {
+			t.Errorf("entry %d task = %q, want none", i, *e.TaskPageID)
+		}
+		if e.EntryPageID != nil {
+			t.Errorf("entry %d Notion row = %q, want none", i, *e.EntryPageID)
+		}
+		if e.SyncState != "pending" {
+			t.Errorf("entry %d sync state = %q, want %q", i, e.SyncState, "pending")
+		}
 	}
 }
 

@@ -57,8 +57,14 @@ func newInitCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			// Data source lookups
+			// Create client and verify token
 			notionClient := notion.NewClient(a.notionBaseURL, token, a.notionHTTPClient)
+			_, err = notionClient.WhoAmI(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			// Data source lookups
 			var tasksDataSourceID *string
 			if cmd.Flag("tasks-db").Changed {
 				ds, err := notionClient.LookupDataSourceID(cmd.Context(), tasksDbID)

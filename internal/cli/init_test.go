@@ -802,6 +802,38 @@ func TestMapTaskProperties_FindsProject(t *testing.T) {
 			},
 			wantProject: "Client work",
 		},
+		{
+			name: "several_relations_to_projects_prefers_project_name",
+			properties: []string{
+				titleProperty("Task"),
+				relationProperty("Client work", mapProjectsDataSourceID),
+				relationProperty("Project", mapProjectsDataSourceID),
+				relationProperty("Related projects", mapProjectsDataSourceID),
+				doneProperty,
+			},
+			wantProject: "Project",
+		},
+		{
+			name: "project_name_preferred_ignoring_case",
+			properties: []string{
+				titleProperty("Task"),
+				relationProperty("Client work", mapProjectsDataSourceID),
+				relationProperty("PROJECT", mapProjectsDataSourceID),
+				doneProperty,
+			},
+			wantProject: "PROJECT",
+		},
+		{
+			// The name only breaks a tie between relations that target projects
+			name: "project_name_ignored_when_it_targets_another_data_source",
+			properties: []string{
+				titleProperty("Task"),
+				relationProperty("Project", mapOtherDataSourceID),
+				relationProperty("Client work", mapProjectsDataSourceID),
+				doneProperty,
+			},
+			wantProject: "Client work",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1398,4 +1430,53 @@ func TestRun_Init_RequiredPropertyMissing(t *testing.T) {
 			checkCacheStateUntouched(t, dbPath)
 		})
 	}
+}
+
+// Several relations to projects, none named Project, can't be told apart, so init lists them and
+// stops before it refreshes or saves anything. Their order is fixed because the schema's isn't
+// (DESIGN.md §5, §8)
+func TestRun_Init_SeveralProjectRelations_ReturnsCandidates(t *testing.T) {
+	s, requested := connectedNotion(t, []string{
+		titleProperty("Task"),
+		relationProperty("Related projects", mapProjectsDataSourceID),
+		relationProperty("Client work", mapProjectsDataSourceID),
+		relationProperty("Another", mapProjectsDataSourceID),
+		relationProperty("Owner", mapOtherDataSourceID),
+		doneProperty,
+	})
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
+
+	exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client())
+
+	checkInitError(t, exit, stdout, stderr, 3, clierr.AmbiguousSelector)
+
+	var doc struct {
+		Error struct {
+			Details struct {
+				Selector   string          `json:"selector"`
+				Candidates json.RawMessage `json:"candidates"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stderr, &doc); err != nil {
+		t.Fatalf("unable to decode error document %q: %v", stderr, err)
+	}
+	if doc.Error.Details.Selector != mapTasksDataSourceID {
+		t.Errorf("selector = %q, want %q", doc.Error.Details.Selector, mapTasksDataSourceID)
+	}
+	// Compared as JSON because the shape of each candidate is part of the contract
+	wantCandidates := `[{"name":"Another"},{"name":"Client work"},{"name":"Related projects"}]`
+	if got := string(doc.Error.Details.Candidates); got != wantCandidates {
+		t.Errorf("candidates = %s, want %s", got, wantCandidates)
+	}
+
+	want := []string{"/data_sources/" + mapTasksDataSourceID}
+	if got := requested(); !slices.Equal(got, want) {
+		t.Errorf("paths requested = %v, want %v", got, want)
+	}
+	if got := storedContext(t, dbPath).PropertyMap; got != nil {
+		t.Errorf("stored property map = %v, want none", got)
+	}
+	checkCacheStateUntouched(t, dbPath)
 }

@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -196,10 +198,39 @@ func mapTaskProperties(ctx context.Context, nc *notion.Client, tasksDataSourceID
 				return nil, warnings, &clierr.Error{Code: clierr.NotFound, Message: "invalid tasks data source: no project relational property found", Details: map[string]any{"data_source_id": tasksDataSourceID}}
 			}
 
+			// Find all relation properties that point to the projects data source
+			matching := []notion.DataSourceProperty{}
 			for _, p := range relProps {
 				if p.Relation.DataSourceID == projectsDataSourceID {
-					results[k] = p.Name
-					break
+					matching = append(matching, p)
+				}
+			}
+
+			if len(matching) == 1 {
+				results[k] = matching[0].Name
+			}
+
+			if len(matching) > 1 {
+				for _, m := range matching {
+					if strings.ToLower(m.Name) == k {
+						results[k] = m.Name
+						break
+					}
+				}
+
+				// More than one matching relation, ambiguously named
+				if _, ok := results[k]; !ok {
+					type candidate struct {
+						Name string `json:"name"`
+					}
+					candidates := []candidate{}
+					for _, m := range matching {
+						candidates = append(candidates, candidate{Name: m.Name})
+					}
+					slices.SortFunc(candidates, func(a, b candidate) int {
+						return cmp.Compare(a.Name, b.Name)
+					})
+					return nil, warnings, &clierr.Error{Code: clierr.AmbiguousSelector, Message: "invalid tasks data source: more than one relation points to the projects data source and none named \"Project\"", Details: map[string]any{"selector": tasksDataSourceID, "candidates": candidates}}
 				}
 			}
 

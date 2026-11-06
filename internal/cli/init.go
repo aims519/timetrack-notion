@@ -182,6 +182,12 @@ func newInitCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			// Query waiting entries
+			waitingCount, err := a.db.WaitingEntriesCount(cmd.Context())
+			if err != nil {
+				return err
+			}
+
 			allWarnings := taskPropWarnings
 			doc := output.NewInitDoc(output.NotionContext{
 				ContextID:            updatedContext.ID,
@@ -190,7 +196,7 @@ func newInitCmd(a *app) *cobra.Command {
 				EntriesDataSourceID:  updatedContext.EntriesDataSourceID,
 				DefaultProjectPageID: updatedContext.DefaultProjectPageID,
 				PropertyMap:          updatedContext.PropertyMap,
-			}, allWarnings)
+			}, waitingCount, allWarnings)
 
 			return output.Write(cmd.OutOrStdout(), cmd.ErrOrStderr(), *a.format, doc, loc)
 		},

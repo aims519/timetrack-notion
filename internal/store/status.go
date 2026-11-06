@@ -153,3 +153,18 @@ func countSummary(ctx context.Context, tx *sql.Tx, dbPath string) (CountSummary,
 
 	return CountSummary{Pending: pendingCount, Waiting: waitingCount, Blocked: blockedCount}, nil
 }
+
+func (s *Store) WaitingEntriesCount(ctx context.Context) (int, error) {
+	tx, err := s.connectionPool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return 0, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	summary, err := countSummary(ctx, tx, s.dbPath)
+	if err != nil {
+		return 0, err
+	}
+
+	return summary.Waiting, nil
+}

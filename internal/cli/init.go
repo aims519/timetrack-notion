@@ -21,6 +21,7 @@ func newInitCmd(a *app) *cobra.Command {
 	var tasksDbID string
 	var projectsDbID string
 	var projectName string
+	var parentPageID string
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "initialise Notion connection details",
@@ -45,6 +46,10 @@ func newInitCmd(a *app) *cobra.Command {
 
 			if cmd.Flag("project").Changed && projectName == "" {
 				return &clierr.Error{Code: clierr.Usage, Message: "--project name must not be empty"}
+			}
+
+			if cmd.Flag("parent-page").Changed && parentPageID == "" {
+				return &clierr.Error{Code: clierr.Usage, Message: "--parent-page ID must not be empty"}
 			}
 
 			currentNotionContext, err := a.db.NotionContext(cmd.Context(), store.DefaultContextID)
@@ -96,6 +101,36 @@ func newInitCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			var resolvedEntriesDataSourceID string
+			// Fail if no entries data source ID stored and no parent page ID provided
+			if currentNotionContext.EntriesDataSourceID == nil && parentPageID == "" {
+				return &clierr.Error{Code: clierr.NotInitialised, Message: "no entries database exists, try again with --parent-page PAGE_ID to allow it to be created"}
+			}
+
+			// Entries data source ID locally stored, check database still exists
+			if currentNotionContext.EntriesDataSourceID != nil {
+				entriesDS, err := notionClient.GetDataSource(cmd.Context(), *currentNotionContext.EntriesDataSourceID)
+				if err != nil {
+					return fmt.Errorf("saved entries data source no longer found in Notion, restore or re-share: %w", err)
+				}
+
+				if entriesDS.InTrash {
+					return &clierr.Error{Code: clierr.NotInitialised, Message: "saved entries data source has been moved to Notion's trash, restore before retrying", Details: map[string]any{"entries_data_source_id": entriesDS.ID}}
+				}
+
+				if taskProp, found := entriesDS.Properties["Task"]; !found || taskProp.Relation.DataSourceID != resolvedTasksDataSourceID || taskProp.Type != "relation" {
+					if !found || taskProp.Type != "relation" {
+						return &clierr.Error{Code: clierr.NotInitialised, Message: "saved entries data source has no relationship to tasks database", Details: map[string]any{"entries_data_source_id": entriesDS.ID}}
+					}
+
+					if taskProp.Relation.DataSourceID != resolvedTasksDataSourceID {
+						return &clierr.Error{Code: clierr.NotInitialised, Message: "saved entries data source relationship points to a different tasks database", Details: map[string]any{"entries_data_source_id": entriesDS.ID, "tasks_data_source_id": resolvedTasksDataSourceID, "task_relation_data_source_id": taskProp.Relation.DataSourceID}}
+					}
+				}
+
+				resolvedEntriesDataSourceID = entriesDS.ID
+			}
+
 			// Refresh cache (full)
 			clock := refreshClock{}
 			_, err = taskcache.Refresh(cmd.Context(), &clock, a.db, notionClient, resolvedTasksDataSourceID, resolvedProjectsDataSourceID, true, taskProps)
@@ -127,12 +162,19 @@ func newInitCmd(a *app) *cobra.Command {
 				defaultProjectID = &matches[0].PageID
 			}
 
-			// TODO Create time entries database
+			// Time entries database does not yet exist, create
+			if currentNotionContext.EntriesDataSourceID == nil {
+				resolvedEntriesDataSourceID, err = notionClient.CreateDatabase(cmd.Context(), parentPageID, resolvedTasksDataSourceID)
+				if err != nil {
+					return err
+				}
+			}
 
 			// Update Context in DB
 			updatedContext := mergeNotionContextChanges(&currentNotionContext,
 				&resolvedProjectsDataSourceID,
 				&resolvedTasksDataSourceID,
+				&resolvedEntriesDataSourceID,
 				defaultProjectID,
 				taskProps)
 			err = a.db.SaveNotionContext(cmd.Context(), currentNotionContext)
@@ -149,6 +191,7 @@ func newInitCmd(a *app) *cobra.Command {
 				DefaultProjectPageID: updatedContext.DefaultProjectPageID,
 				PropertyMap:          updatedContext.PropertyMap,
 			}, allWarnings)
+
 			return output.Write(cmd.OutOrStdout(), cmd.ErrOrStderr(), *a.format, doc, loc)
 		},
 	}
@@ -156,11 +199,13 @@ func newInitCmd(a *app) *cobra.Command {
 	initCmd.Flags().StringVar(&tasksDbID, "tasks-db", "", "set tasks database ID")
 	initCmd.Flags().StringVar(&projectsDbID, "projects-db", "", "set projects database ID")
 	initCmd.Flags().StringVar(&projectName, "project", "", "name of the context's default project")
+	initCmd.Flags().StringVar(&parentPageID, "parent-page", "", "ID of the parent page under which all other databases live")
 
 	return initCmd
 }
 
-func mergeNotionContextChanges(nc *store.NotionContext, projectsDataSourceID, tasksDataSourceID, defaultProjectPageID *string, tasksPropertyMappings map[string]string) store.NotionContext {
+func mergeNotionContextChanges(nc *store.NotionContext, projectsDataSourceID, tasksDataSourceID, entriesDataSourceID, defaultProjectPageID *string, tasksPropertyMappings map[string]string) store.NotionContext {
+	nc.EntriesDataSourceID = entriesDataSourceID
 	nc.TasksDataSourceID = tasksDataSourceID
 
 	// project data source changed if old and new are not nill, and values differ

@@ -29,6 +29,14 @@ const (
 	tasksDatabasePath  = "/databases/" + tasksDatabaseID
 	// Sorts before tasksDatabasePath, which is the order fakeNotion reports requests in
 	projectsDatabasePath = "/databases/" + projectsDatabaseID
+
+	initParentPageID = "parent-page"
+	// Where init creates the Time entries database. fakeNotion doesn't look at the method, so a
+	// request here counts as a create. Sorts after the data sources and before the lookups
+	createDatabasePath = "/databases"
+
+	entriesDataSourceID   = "entries-ds"
+	entriesDataSourcePath = "/data_sources/" + entriesDataSourceID
 )
 
 type notionResponse struct {
@@ -36,7 +44,27 @@ type notionResponse struct {
 	body   string
 }
 
-var databaseFound = notionResponse{http.StatusOK, `{"object": "database", "data_sources": [{"id": "ds-1", "name": "Data source"}]}`}
+var (
+	databaseFound   = notionResponse{http.StatusOK, `{"object": "database", "data_sources": [{"id": "ds-1", "name": "Data source"}]}`}
+	databaseCreated = notionResponse{http.StatusOK, fmt.Sprintf(`{"object": "database", "id": "entries-db", "data_sources": [{"id": %q, "name": "Time entries"}]}`, entriesDataSourceID)}
+)
+
+// withParentPage is args plus --parent-page, for tests where init gets as far as needing it but
+// aren't about the Time entries database
+func withParentPage(args ...string) []string {
+	return append(slices.Clone(args), "--parent-page", initParentPageID)
+}
+
+// requestCount is how many times path appears in paths
+func requestCount(paths []string, path string) int {
+	count := 0
+	for _, p := range paths {
+		if p == path {
+			count++
+		}
+	}
+	return count
+}
 
 // fakeNotion answers each path from responses, and checks every request carries the token from
 // NOTION_TOKEN. The returned function gives the paths requested, sorted, so a test doesn't depend
@@ -406,10 +434,10 @@ func TestRun_Init_ResolvesDataSources(t *testing.T) {
 	projectsQueryPath := "/data_sources/" + mapProjectsDataSourceID + "/query"
 	noPages := notionResponse{http.StatusOK, `{"object": "list", "results": [], "next_cursor": null, "has_more": false}`}
 
-	// Every run reads the tasks schema and refreshes both data sources. These paths sort before
-	// the database lookups, which are added after them
+	// Every run reads the tasks schema, refreshes both data sources and creates the entries
+	// database. These paths sort before the database lookups, which are added after them
 	requestsWith := func(lookups ...string) []string {
-		return append([]string{projectsQueryPath, tasksDataSourcePath, tasksQueryPath}, lookups...)
+		return append([]string{projectsQueryPath, tasksDataSourcePath, tasksQueryPath, createDatabasePath}, lookups...)
 	}
 
 	tests := []struct {
@@ -465,13 +493,14 @@ func TestRun_Init_ResolvesDataSources(t *testing.T) {
 					orderProperty,
 					doneProperty,
 				}),
-				tasksQueryPath:    noPages,
-				projectsQueryPath: noPages,
+				tasksQueryPath:     noPages,
+				projectsQueryPath:  noPages,
+				createDatabasePath: databaseCreated,
 			})
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			seedDataSources(t, dbPath, tc.storedTasks, tc.storedProj)
 
-			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), tc.args...)
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage(tc.args...)...)
 			if exit != 0 {
 				t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
 			}
@@ -577,6 +606,7 @@ func TestRun_Init_EmptyFlag_MakesNoRequests(t *testing.T) {
 	}{
 		{name: "tasks_empty_projects_set", args: []string{"--tasks-db", "", "--projects-db", projectsDatabaseID}},
 		{name: "tasks_set_projects_empty", args: []string{"--tasks-db", tasksDatabaseID, "--projects-db", ""}},
+		{name: "tasks_set_parent_page_empty", args: []string{"--tasks-db", tasksDatabaseID, "--parent-page", ""}},
 	}
 
 	for _, tc := range tests {
@@ -642,6 +672,14 @@ func TestRun_Init_Errors(t *testing.T) {
 			wantExit:    2,
 			wantCode:    clierr.Usage,
 			wantMessage: "--projects-db",
+		},
+		{
+			name:        "parent_page_empty",
+			token:       ptr("test-token"),
+			args:        []string{"init", "--parent-page", ""},
+			wantExit:    2,
+			wantCode:    clierr.Usage,
+			wantMessage: "--parent-page",
 		},
 		{
 			name:     "timezone_empty",
@@ -1027,18 +1065,67 @@ func projectPage(id, name string) string {
 	return fmt.Sprintf(`{"object": "page", "id": %q, "created_time": "2026-11-02T09:00:00.000Z", "last_edited_time": "2026-11-02T09:00:00.000Z", "in_trash": false, "properties": {"Name": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": %q}]}}}`, id, name)
 }
 
-// connectedNotion is a fake Notion that answers everything init asks for: both database lookups,
-// the tasks schema, and a refresh that finds no tasks and the given project pages
-func connectedNotion(t *testing.T, schema []string, projectPages ...string) (*httptest.Server, func() []string) {
-	t.Helper()
-
-	return fakeNotion(t, map[string]notionResponse{
+// connectedResponses answers everything init asks for on a first run: both database lookups, the
+// tasks schema, a refresh that finds no tasks and the given project pages, and creating the entries
+// database. A test about a stored entries database adds entriesDataSourcePath, and a test about a
+// failed create replaces createDatabasePath
+func connectedResponses(schema []string, projectPages ...string) map[string]notionResponse {
+	return map[string]notionResponse{
 		tasksDatabasePath:                                     databaseWithDataSource(mapTasksDataSourceID),
 		projectsDatabasePath:                                  databaseWithDataSource(mapProjectsDataSourceID),
 		"/data_sources/" + mapTasksDataSourceID:               tasksSchema(schema),
 		"/data_sources/" + mapTasksDataSourceID + "/query":    {http.StatusOK, `{"object": "list", "results": [], "next_cursor": null, "has_more": false}`},
 		"/data_sources/" + mapProjectsDataSourceID + "/query": {http.StatusOK, fmt.Sprintf(`{"object": "list", "results": [%s], "next_cursor": null, "has_more": false}`, strings.Join(projectPages, ", "))},
+		createDatabasePath:                                    databaseCreated,
+	}
+}
+
+// connectedNotion is a fake Notion answering with connectedResponses
+func connectedNotion(t *testing.T, schema []string, projectPages ...string) (*httptest.Server, func() []string) {
+	t.Helper()
+
+	return fakeNotion(t, connectedResponses(schema, projectPages...))
+}
+
+// entriesSchema is the response for the stored entries data source
+func entriesSchema(inTrash bool, properties ...string) notionResponse {
+	return notionResponse{http.StatusOK, fmt.Sprintf(`{"object": "data_source", "id": %q, "in_trash": %t, "properties": {%s}}`, entriesDataSourceID, inTrash, strings.Join(properties, ", "))}
+}
+
+// entriesLinkedTo is a live entries data source whose Task relation targets tasksDataSourceID
+func entriesLinkedTo(tasksDataSourceID string) notionResponse {
+	return entriesSchema(false, titleProperty("Title"), relationProperty("Task", tasksDataSourceID))
+}
+
+// seedEntriesDataSource stores the entries data source ID in the default context
+func seedEntriesDataSource(t *testing.T, dbPath string) {
+	t.Helper()
+
+	onStore(t, dbPath, func(st *store.Store) {
+		nc, err := st.NotionContext(t.Context(), store.DefaultContextID)
+		if err != nil {
+			t.Fatalf("NotionContext(): %v", err)
+		}
+		id := entriesDataSourceID
+		nc.EntriesDataSourceID = &id
+		if err := st.SaveNotionContext(t.Context(), nc); err != nil {
+			t.Fatalf("SaveNotionContext(): %v", err)
+		}
 	})
+}
+
+// checkEntriesDataSource fails the test unless the stored entries data source ID is want, empty
+// meaning unset
+func checkEntriesDataSource(t *testing.T, dbPath, want string) {
+	t.Helper()
+
+	var got string
+	if id := storedContext(t, dbPath).EntriesDataSourceID; id != nil {
+		got = *id
+	}
+	if got != want {
+		t.Errorf("stored entries data source = %q, want %q", got, want)
+	}
 }
 
 // onStore runs fn against the database at dbPath, for seeding it or reading it back
@@ -1104,7 +1191,7 @@ func TestRun_Init_DoesFullRefresh(t *testing.T) {
 		}
 	})
 
-	exit, _, stderr := runInitOnDB(t, dbPath, s.URL, s.Client())
+	exit, _, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage()...)
 	if exit != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
 	}
@@ -1198,7 +1285,7 @@ func TestRun_Init_DefaultProject(t *testing.T) {
 				seedDefaultProject(t, dbPath, tc.storedDefault)
 			}
 
-			exit, _, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), tc.args...)
+			exit, _, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage(tc.args...)...)
 			if exit != 0 {
 				t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
 			}
@@ -1214,7 +1301,8 @@ func TestRun_Init_DefaultProject(t *testing.T) {
 	}
 }
 
-// A wrong name stops init before anything is saved to the context, so a re-run is enough (DESIGN.md §5)
+// A wrong name stops init before anything is created in Notion or saved to the context, so a re-run
+// is enough (DESIGN.md §5)
 func TestRun_Init_DefaultProject_Errors(t *testing.T) {
 	const storedDefault = "storeddefaultpage"
 
@@ -1248,7 +1336,7 @@ func TestRun_Init_DefaultProject_Errors(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, _ := connectedNotion(t, fullTasksSchema(),
+			s, requested := connectedNotion(t, fullTasksSchema(),
 				projectPage("adminpageupper", "Admin"),
 				projectPage("adminpagelower", "admin"))
 			dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -1261,9 +1349,14 @@ func TestRun_Init_DefaultProject_Errors(t *testing.T) {
 				}
 			})
 
-			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), "--projects-db", projectsDatabaseID, "--project", tc.project)
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage("--projects-db", projectsDatabaseID, "--project", tc.project)...)
 
 			checkInitError(t, exit, stdout, stderr, 3, tc.wantCode)
+
+			if got := requestCount(requested(), createDatabasePath); got != 0 {
+				t.Errorf("created the entries database %d times, want none", got)
+			}
+			checkEntriesDataSource(t, dbPath, "")
 
 			var doc struct {
 				Error struct {
@@ -1337,7 +1430,7 @@ func TestRun_Init_SavesPropertyMapAndReportsWarnings(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
 
-			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client())
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage()...)
 			if exit != 0 {
 				t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
 			}
@@ -1479,4 +1572,362 @@ func TestRun_Init_SeveralProjectRelations_ReturnsCandidates(t *testing.T) {
 		t.Errorf("stored property map = %v, want none", got)
 	}
 	checkCacheStateUntouched(t, dbPath)
+}
+
+// With no entries database yet, init creates one and both reports and saves the data source from
+// the response (DESIGN.md §5)
+func TestRun_Init_CreatesEntriesDatabase(t *testing.T) {
+	s, requested := connectedNotion(t, fullTasksSchema())
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
+
+	exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage()...)
+	if exit != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
+	}
+
+	if got := requestCount(requested(), createDatabasePath); got != 1 {
+		t.Errorf("created the entries database %d times, want 1", got)
+	}
+
+	var doc struct {
+		Context struct {
+			EntriesDataSourceID string `json:"entries_data_source_id"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal(stdout, &doc); err != nil {
+		t.Fatalf("unable to decode document %q: %v", stdout, err)
+	}
+	if doc.Context.EntriesDataSourceID != entriesDataSourceID {
+		t.Errorf("output entries data source = %q, want %q", doc.Context.EntriesDataSourceID, entriesDataSourceID)
+	}
+	checkEntriesDataSource(t, dbPath, entriesDataSourceID)
+}
+
+// A parent page is only needed to create the database, so nothing else has to be checked first. The
+// check comes before the refresh, so a forgotten flag doesn't cost one
+func TestRun_Init_NoEntriesDatabaseNoParentPage_ReturnsNotInitialised(t *testing.T) {
+	s, requested := connectedNotion(t, fullTasksSchema())
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
+
+	exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client())
+
+	checkInitError(t, exit, stdout, stderr, 5, clierr.NotInitialised)
+
+	if !bytes.Contains(stderr, []byte("--parent-page")) {
+		t.Errorf("error doesn't mention --parent-page: %s", stderr)
+	}
+
+	want := []string{"/data_sources/" + mapTasksDataSourceID}
+	if got := requested(); !slices.Equal(got, want) {
+		t.Errorf("paths requested = %v, want %v", got, want)
+	}
+	checkEntriesDataSource(t, dbPath, "")
+	if got := storedContext(t, dbPath).PropertyMap; got != nil {
+		t.Errorf("stored property map = %v, want none", got)
+	}
+	checkCacheStateUntouched(t, dbPath)
+}
+
+// A stored entries database that's still usable is reused: re-running init never creates another
+// (DESIGN.md §5)
+func TestRun_Init_ReusesEntriesDatabase(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "nothing_given"},
+		{name: "parent_page_given_is_ignored", args: withParentPage()},
+		{
+			// The database is looked up again, but its data source hasn't changed
+			name: "same_tasks_database_given",
+			args: []string{"--tasks-db", tasksDatabaseID},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := connectedResponses(fullTasksSchema())
+			responses[entriesDataSourcePath] = entriesLinkedTo(mapTasksDataSourceID)
+			s, requested := fakeNotion(t, responses)
+
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
+			seedEntriesDataSource(t, dbPath)
+
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), tc.args...)
+			if exit != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
+			}
+
+			got := requested()
+			if n := requestCount(got, createDatabasePath); n != 0 {
+				t.Errorf("created the entries database %d times, want none", n)
+			}
+			if n := requestCount(got, entriesDataSourcePath); n != 1 {
+				t.Errorf("checked the entries data source %d times, want 1", n)
+			}
+
+			var doc struct {
+				Context struct {
+					EntriesDataSourceID string `json:"entries_data_source_id"`
+				} `json:"context"`
+			}
+			if err := json.Unmarshal(stdout, &doc); err != nil {
+				t.Fatalf("unable to decode document %q: %v", stdout, err)
+			}
+			if doc.Context.EntriesDataSourceID != entriesDataSourceID {
+				t.Errorf("output entries data source = %q, want %q", doc.Context.EntriesDataSourceID, entriesDataSourceID)
+			}
+			checkEntriesDataSource(t, dbPath, entriesDataSourceID)
+		})
+	}
+}
+
+// The ID the first run saves is the one the second run checks, so it doesn't create a second database
+func TestRun_Init_Rerun_DoesNotCreateAgain(t *testing.T) {
+	responses := connectedResponses(fullTasksSchema())
+	responses[entriesDataSourcePath] = entriesLinkedTo(mapTasksDataSourceID)
+	s, requested := fakeNotion(t, responses)
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
+
+	for _, args := range [][]string{withParentPage(), nil} {
+		exit, _, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), args...)
+		if exit != 0 {
+			t.Fatalf("init %v: exit code = %d, want 0 (stderr: %q)", args, exit, stderr)
+		}
+	}
+
+	if got := requestCount(requested(), createDatabasePath); got != 1 {
+		t.Errorf("created the entries database %d times, want 1", got)
+	}
+	checkEntriesDataSource(t, dbPath, entriesDataSourceID)
+}
+
+// A stored entries database that can't be used stops init before it refreshes or saves anything.
+// Every case passes --parent-page, because replacing the database could strand rows already synced,
+// so the flag must never create a new one
+func TestRun_Init_StoredEntriesDatabaseUnusable(t *testing.T) {
+	const oldTasksDataSourceID = "old-tasks-ds"
+
+	tests := []struct {
+		name        string
+		args        []string
+		storedTasks string
+		entries     notionResponse
+		wantExit    int
+		wantCode    clierr.ErrorCode
+		wantMessage string // part of the error message; empty skips the check
+		wantDetails bool   // details should name the entries data source
+		// Details saying what the relation targets and what it should. Empty means no such key,
+		// because a property that isn't a relation has no target to report
+		wantRelationID string
+		wantTasksID    string
+	}{
+		{
+			name:        "in_trash",
+			storedTasks: mapTasksDataSourceID,
+			entries:     entriesSchema(true, titleProperty("Title"), relationProperty("Task", mapTasksDataSourceID)),
+			wantExit:    5,
+			wantCode:    clierr.NotInitialised,
+			wantMessage: "trash",
+			wantDetails: true,
+		},
+		{
+			// The stored database still links to the tasks database this run replaces
+			name:           "tasks_database_changed",
+			args:           []string{"--tasks-db", tasksDatabaseID},
+			storedTasks:    oldTasksDataSourceID,
+			entries:        entriesLinkedTo(oldTasksDataSourceID),
+			wantExit:       5,
+			wantCode:       clierr.NotInitialised,
+			wantMessage:    "different tasks database",
+			wantDetails:    true,
+			wantRelationID: oldTasksDataSourceID,
+			wantTasksID:    mapTasksDataSourceID,
+		},
+		{
+			name:           "task_relation_points_elsewhere",
+			storedTasks:    mapTasksDataSourceID,
+			entries:        entriesLinkedTo(mapOtherDataSourceID),
+			wantExit:       5,
+			wantCode:       clierr.NotInitialised,
+			wantMessage:    "different tasks database",
+			wantDetails:    true,
+			wantRelationID: mapOtherDataSourceID,
+			wantTasksID:    mapTasksDataSourceID,
+		},
+		{
+			// Renamed or deleted in Notion
+			name:        "task_property_missing",
+			storedTasks: mapTasksDataSourceID,
+			entries:     entriesSchema(false, titleProperty("Title")),
+			wantExit:    5,
+			wantCode:    clierr.NotInitialised,
+			wantMessage: "has no",
+			wantDetails: true,
+		},
+		{
+			// Has no target at all, which mustn't read as linking to a different database
+			name:        "task_property_not_a_relation",
+			storedTasks: mapTasksDataSourceID,
+			entries:     entriesSchema(false, titleProperty("Title"), `"Task": {"id": "tsk", "name": "Task", "type": "rich_text", "rich_text": {}}`),
+			wantExit:    5,
+			wantCode:    clierr.NotInitialised,
+			wantMessage: "has no",
+			wantDetails: true,
+		},
+		{
+			// What Notion returns for a database that's been deleted or un-shared. The message isn't
+			// checked yet: printError drops the text init wraps this error with (see issue #20)
+			name:        "not_found",
+			storedTasks: mapTasksDataSourceID,
+			entries:     notionResponse{http.StatusNotFound, `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find data source."}`},
+			wantExit:    3,
+			wantCode:    clierr.NotFound,
+		},
+		// Other failures keep their own code, because they don't mean the database has gone
+		{
+			name:        "invalid_token",
+			storedTasks: mapTasksDataSourceID,
+			entries:     notionResponse{http.StatusUnauthorized, `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`},
+			wantExit:    5,
+			wantCode:    clierr.AccessDenied,
+		},
+		{
+			name:        "server_error",
+			storedTasks: mapTasksDataSourceID,
+			entries:     notionResponse{http.StatusInternalServerError, `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`},
+			wantExit:    10,
+			wantCode:    clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := connectedResponses(fullTasksSchema())
+			responses[entriesDataSourcePath] = tc.entries
+			s, requested := fakeNotion(t, responses)
+
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			seedDataSources(t, dbPath, tc.storedTasks, mapProjectsDataSourceID)
+			seedEntriesDataSource(t, dbPath)
+
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage(tc.args...)...)
+
+			checkInitError(t, exit, stdout, stderr, tc.wantExit, tc.wantCode)
+
+			var doc struct {
+				Error struct {
+					Message string `json:"message"`
+					// A map, because a struct can't tell a missing key from an empty value, and
+					// which keys appear is part of the contract (DESIGN.md §8)
+					Details map[string]any `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(stderr, &doc); err != nil {
+				t.Fatalf("unable to decode error document %q: %v", stderr, err)
+			}
+			if !strings.Contains(doc.Error.Message, tc.wantMessage) {
+				t.Errorf("error message = %q, want it to include %q", doc.Error.Message, tc.wantMessage)
+			}
+			if id := doc.Error.Details["entries_data_source_id"]; tc.wantDetails && id != entriesDataSourceID {
+				t.Errorf("details entries_data_source_id = %v, want %q", id, entriesDataSourceID)
+			}
+			for key, want := range map[string]string{
+				"task_relation_data_source_id": tc.wantRelationID,
+				"tasks_data_source_id":         tc.wantTasksID,
+			} {
+				got, present := doc.Error.Details[key]
+				if want == "" {
+					if present {
+						t.Errorf("details %s = %v, want no such key", key, got)
+					}
+					continue
+				}
+				if got != want {
+					t.Errorf("details %s = %v, want %q", key, got, want)
+				}
+			}
+
+			if got := requestCount(requested(), createDatabasePath); got != 0 {
+				t.Errorf("created the entries database %d times, want none", got)
+			}
+			checkCacheStateUntouched(t, dbPath)
+
+			checkEntriesDataSource(t, dbPath, entriesDataSourceID)
+			gotTasks, _ := storedDataSources(t, dbPath)
+			if gotTasks != tc.storedTasks {
+				t.Errorf("stored tasks data source = %q, want %q", gotTasks, tc.storedTasks)
+			}
+			if got := storedContext(t, dbPath).PropertyMap; got != nil {
+				t.Errorf("stored property map = %v, want none", got)
+			}
+		})
+	}
+}
+
+// A failed create saves nothing to the context, so re-running init tries again (DESIGN.md §5)
+func TestRun_Init_CreateEntriesDatabaseFails_SavesNothing(t *testing.T) {
+	const oldTasksDataSourceID = "old-tasks-ds"
+
+	tests := []struct {
+		name     string
+		response notionResponse
+		wantExit int
+		wantCode clierr.ErrorCode
+	}{
+		{
+			// A wrong ID, or a page not shared with the integration
+			name:     "parent_page_not_found",
+			response: notionResponse{http.StatusNotFound, `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find page."}`},
+			wantExit: 3,
+			wantCode: clierr.NotFound,
+		},
+		{
+			name:     "rejected",
+			response: notionResponse{http.StatusBadRequest, `{"object": "error", "status": 400, "code": "validation_error", "message": "body failed validation"}`},
+			wantExit: 2,
+			wantCode: clierr.Usage,
+		},
+		{
+			name:     "server_error",
+			response: notionResponse{http.StatusInternalServerError, `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`},
+			wantExit: 10,
+			wantCode: clierr.Internal,
+		},
+		{
+			name:     "no_data_source_in_response",
+			response: notionResponse{http.StatusOK, `{"object": "database", "id": "entries-db", "data_sources": []}`},
+			wantExit: 10,
+			wantCode: clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := connectedResponses(fullTasksSchema())
+			responses[createDatabasePath] = tc.response
+			s, _ := fakeNotion(t, responses)
+
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			seedDataSources(t, dbPath, oldTasksDataSourceID, mapProjectsDataSourceID)
+
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage("--tasks-db", tasksDatabaseID)...)
+
+			checkInitError(t, exit, stdout, stderr, tc.wantExit, tc.wantCode)
+
+			checkEntriesDataSource(t, dbPath, "")
+			gotTasks, _ := storedDataSources(t, dbPath)
+			if gotTasks != oldTasksDataSourceID {
+				t.Errorf("stored tasks data source = %q, want %q", gotTasks, oldTasksDataSourceID)
+			}
+			if got := storedContext(t, dbPath).PropertyMap; got != nil {
+				t.Errorf("stored property map = %v, want none", got)
+			}
+		})
+	}
 }

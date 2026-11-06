@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -240,4 +241,129 @@ func (c *Client) GetDataSource(ctx context.Context, dataSourceID string) (DataSo
 	}
 
 	return dsResult, nil
+}
+
+func (c *Client) CreateDatabase(ctx context.Context, parentPageID string, tasksDataSourceID string) (dataSourceID string, err error) {
+	url := fmt.Sprintf("%s/databases", c.baseURL)
+
+	requestJSON := fmt.Sprintf(`
+	{
+		"parent": {
+			"type": "page_id",
+			"page_id": "%s"
+		},
+		"title": [
+			{
+			"text": {
+				"content": "Time entries"
+			},
+			"type": "text"
+			}
+		],
+		"description": [
+			{
+			"text": {
+				"content": "Entries database, created and managed by tt"
+			},
+			"type": "text"
+			}
+		],
+		"is_inline": false,
+		"initial_data_source": {
+			"properties": {
+				"Title" : {
+					"id": "title",
+					"name": "Title",
+					"type": "title",
+					"title": {}
+				},
+				"Task" : {
+					"id": "task",
+					"type": "relation",
+					"relation" : {
+						"data_source_id": "%s",
+						"type": "dual_property",
+						"dual_property": {}
+					}
+				},
+				"Start": {
+					"id": "start",
+					"name": "Start",
+					"type": "date",
+					"date": {}
+				},
+				"End": {
+					"id": "end",
+					"name": "End",
+					"type": "date",
+					"date": {}
+				},
+				"Description": {
+					"id": "description",
+					"name": "Description",
+					"type": "rich_text",
+					"rich_text": {}
+				},
+				"Local ID": {
+					"id": "local_id",
+					"name": "Local ID",
+					"type": "rich_text",
+					"rich_text": {}
+				},
+				"Minutes": {
+					"id": "minutes",
+					"name": "Minutes",
+					"type": "formula",
+					"formula": {
+						"expression": "dateBetween(prop(\"End\"), prop(\"Start\"), \"minutes\")"
+					}
+				}
+			}
+		}
+	}`, parentPageID, tasksDataSourceID)
+
+	payload := strings.NewReader(requestJSON)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
+	if err != nil {
+		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+	addDefaultHeaders(req, c.apiVersion, c.apiToken)
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
+	}
+	defer res.Body.Close()
+
+	bytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+	}
+
+	err = handleErrorResponse(res, bytes)
+	if err != nil {
+		return "", err
+	}
+
+	type dataSource struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+
+	type response struct {
+		ID          string       `json:"id"`
+		DataSources []dataSource `json:"data_sources"`
+	}
+
+	var resObj response
+	err = json.Unmarshal(bytes, &resObj)
+	if err != nil {
+		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion create database response", Cause: err}
+	}
+
+	if len(resObj.DataSources) != 1 {
+		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion create database response: unexpected data source count", Cause: err}
+	}
+
+	return resObj.DataSources[0].ID, nil
 }

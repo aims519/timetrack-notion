@@ -54,4 +54,5 @@ type DataSource struct {
 	ID         string                        `json:"id"`
 	Title      []DataSourceTitle             `json:"title"`
 	Properties map[string]DataSourceProperty `json:"properties"`
+	InTrash    bool                          `json:"in_trash"`
 }

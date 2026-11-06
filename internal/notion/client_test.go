@@ -917,3 +917,271 @@ func TestLookupDataSourceID_Unreachable_ReturnsOffline(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateDatabase_ReturnsDataSourceID(t *testing.T) {
+	const want = "entries-ds"
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseBody := `{
+			"object": "database",
+			"id": "entries-db",
+			"data_sources": [{"id": "entries-ds", "name": "Time entries"}]
+		}`
+
+		if _, err := w.Write([]byte(responseBody)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, "test-token", s.Client())
+
+	got, err := nc.CreateDatabase(t.Context(), "parent-page", "tasks-ds")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// The schema is what sync and the rollup rely on, so the values come from DESIGN.md §5 and §6.2, not
+// from the client. Decoding the body also proves the request is valid JSON
+func TestCreateDatabase_RequestShape(t *testing.T) {
+	const (
+		parentPageID      = "parent-page"
+		tasksDataSourceID = "tasks-ds"
+		token             = "test-token"
+	)
+
+	wantHeaders := map[string]string{
+		"Authorization":  "Bearer " + token,
+		"Notion-Version": "2026-03-11",
+		"Content-Type":   "application/json",
+	}
+	wantPropertyTypes := map[string]string{
+		"Title":       "title",
+		"Task":        "relation",
+		"Start":       "date",
+		"End":         "date",
+		"Description": "rich_text",
+		"Local ID":    "rich_text",
+		"Minutes":     "formula",
+	}
+
+	type requestBody struct {
+		Parent struct {
+			Type   string `json:"type"`
+			PageID string `json:"page_id"`
+		} `json:"parent"`
+		Title []struct {
+			Text struct {
+				Content string `json:"content"`
+			} `json:"text"`
+		} `json:"title"`
+		InitialDataSource struct {
+			Properties map[string]struct {
+				Type     string `json:"type"`
+				Relation struct {
+					DataSourceID string    `json:"data_source_id"`
+					DualProperty *struct{} `json:"dual_property"`
+				} `json:"relation"`
+				Formula struct {
+					Expression string `json:"expression"`
+				} `json:"formula"`
+			} `json:"properties"`
+		} `json:"initial_data_source"`
+	}
+
+	var requests atomic.Int32
+	var body requestBody
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want %q", r.Method, http.MethodPost)
+		}
+
+		if r.URL.Path != "/databases" {
+			t.Errorf("path = %q, want %q", r.URL.Path, "/databases")
+		}
+
+		for name, want := range wantHeaders {
+			if got := r.Header.Get(name); got != want {
+				t.Errorf("header %s = %q, want %q", name, got, want)
+			}
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("request body is not valid JSON: %v", err)
+		}
+
+		if _, err := w.Write([]byte(`{"object": "database", "data_sources": [{"id": "entries-ds"}]}`)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, token, s.Client())
+
+	if _, err := nc.CreateDatabase(t.Context(), parentPageID, tasksDataSourceID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Errorf("unexpected request count. Got %d, want 1", got)
+	}
+
+	if body.Parent.Type != "page_id" || body.Parent.PageID != parentPageID {
+		t.Errorf("parent = %+v, want page_id %q", body.Parent, parentPageID)
+	}
+
+	if len(body.Title) != 1 || body.Title[0].Text.Content != "Time entries" {
+		t.Errorf("title = %+v, want %q", body.Title, "Time entries")
+	}
+
+	properties := body.InitialDataSource.Properties
+	gotPropertyTypes := map[string]string{}
+	for name, p := range properties {
+		gotPropertyTypes[name] = p.Type
+	}
+	if !reflect.DeepEqual(gotPropertyTypes, wantPropertyTypes) {
+		t.Errorf("property types = %v, want %v", gotPropertyTypes, wantPropertyTypes)
+	}
+
+	// Two-way, so a rollup on the tasks database can reach the entries
+	task := properties["Task"]
+	if task.Relation.DataSourceID != tasksDataSourceID {
+		t.Errorf("Task relation data_source_id = %q, want %q", task.Relation.DataSourceID, tasksDataSourceID)
+	}
+	if task.Relation.DualProperty == nil {
+		t.Error("Task relation has no dual_property, want it two-way")
+	}
+
+	// End comes first: dateBetween subtracts its second date from its first, so the other way round
+	// every entry's minutes would be negative
+	wantExpression := `dateBetween(prop("End"), prop("Start"), "minutes")`
+	if got := properties["Minutes"].Formula.Expression; got != wantExpression {
+		t.Errorf("Minutes expression = %q, want %q", got, wantExpression)
+	}
+}
+
+func TestCreateDatabase_ErrorResponse_ReturnsCLIError(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantCode clierr.ErrorCode
+	}{
+		{
+			name:     "bad request",
+			status:   http.StatusBadRequest,
+			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "body failed validation"}`,
+			wantCode: clierr.Usage,
+		},
+		{
+			name:     "invalid token",
+			status:   http.StatusUnauthorized,
+			body:     `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`,
+			wantCode: clierr.AccessDenied,
+		},
+		{
+			// What Notion returns for a parent page that isn't shared with the integration, too
+			name:     "parent page not found",
+			status:   http.StatusNotFound,
+			body:     `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find page."}`,
+			wantCode: clierr.NotFound,
+		},
+		{
+			name:     "server error",
+			status:   http.StatusInternalServerError,
+			body:     `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`,
+			wantCode: clierr.Internal,
+		},
+		// Edge cases: a 200 that can't give a data source ID must not look like a success
+		{
+			name:     "no data sources",
+			status:   http.StatusOK,
+			body:     `{"object": "database", "id": "entries-db", "data_sources": []}`,
+			wantCode: clierr.Internal,
+		},
+		{
+			name:     "several data sources",
+			status:   http.StatusOK,
+			body:     `{"object": "database", "id": "entries-db", "data_sources": [{"id": "ds-1"}, {"id": "ds-2"}]}`,
+			wantCode: clierr.Internal,
+		},
+		{
+			name:     "body is not JSON",
+			status:   http.StatusOK,
+			body:     `<html><body>not JSON</body></html>`,
+			wantCode: clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			got, err := nc.CreateDatabase(t.Context(), "parent-page", "tasks-ds")
+			if err == nil {
+				t.Fatalf("expected an error, got ID %q", got)
+			}
+
+			if got != "" {
+				t.Errorf("expected no ID alongside an error, got %q", got)
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != tc.wantCode {
+				t.Errorf("error code = %q, want %q", ce.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// When Notion can't be reached there's no HTTP status to map, so the error is offline (DESIGN.md §8)
+func TestCreateDatabase_Unreachable_ReturnsOffline(t *testing.T) {
+	const token = "secret-test-token"
+
+	// See TestQueryDataSource_Unreachable_ReturnsOffline for why this needs NewServer
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to a closed server: %s %s", r.Method, r.URL.Path)
+	}))
+	nc := NewClient(s.URL, token, s.Client())
+
+	s.Close()
+
+	got, err := nc.CreateDatabase(t.Context(), "parent-page", "tasks-ds")
+	if err == nil {
+		t.Fatalf("expected an error, got ID %q", got)
+	}
+
+	var ce *clierr.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("error %v is not a *clierr.Error", err)
+	}
+
+	if ce.Code != clierr.Offline {
+		t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+	}
+
+	// The cause is printed with the error, so it must never carry the token (DESIGN.md §9)
+	if strings.Contains(err.Error(), token) || (ce.Cause != nil && strings.Contains(ce.Cause.Error(), token)) {
+		t.Errorf("error includes the token: %v", err)
+	}
+}

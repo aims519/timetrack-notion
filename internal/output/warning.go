@@ -3,9 +3,10 @@ package output
 type WarningCode string
 
 const (
-	Overlap        WarningCode = "overlap"
-	StaleTimer     WarningCode = "stale_timer"
-	TaskCacheStale WarningCode = "task_cache_stale"
+	Overlap              WarningCode = "overlap"
+	StaleTimer           WarningCode = "stale_timer"
+	TaskCacheStale       WarningCode = "task_cache_stale"
+	OrderPropertyMissing WarningCode = "order_property_missing"
 )
 
 type Warning struct {

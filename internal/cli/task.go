@@ -90,7 +90,7 @@ func executeRefreshUpdates(ctx context.Context, a *app, clock *refreshClock, nc 
 		return output.RefreshDoc{}, &clierr.Error{Code: clierr.NotInitialised, Message: "no projects data source id found, run 'tt init' to set up connection to Notion"}
 	}
 
-	res, err := taskcache.Refresh(ctx, clock, a.db, nc, *cont.TasksDataSourceID, *cont.ProjectsDataSourceID, fullRefresh)
+	res, err := taskcache.Refresh(ctx, clock, a.db, nc, *cont.TasksDataSourceID, *cont.ProjectsDataSourceID, fullRefresh, cont.PropertyMap)
 	if err != nil {
 		return output.RefreshDoc{}, err
 	}
@@ -205,10 +205,15 @@ func autoRefreshTaskCache(ctx context.Context, a *app, notionToken string) ([]ou
 		return nil, nil
 	}
 
+	// Also skip if no task mappings saved
+	if cont.PropertyMap == nil {
+		return nil, nil
+	}
+
 	c := &refreshClock{}
 	notionClient := notion.NewClient(a.notionBaseURL, notionToken, a.notionHTTPClient)
 
-	res, err := taskcache.AutoRefresh(ctx, c, a.db, notionClient, *cont.TasksDataSourceID, *cont.ProjectsDataSourceID)
+	res, err := taskcache.AutoRefresh(ctx, c, a.db, notionClient, *cont.TasksDataSourceID, *cont.ProjectsDataSourceID, cont.PropertyMap)
 	if err != nil {
 		return []output.Warning{{Code: output.TaskCacheStale, Message: fmt.Sprintf("auto task refresh failed: %v", err)}}, nil
 	}

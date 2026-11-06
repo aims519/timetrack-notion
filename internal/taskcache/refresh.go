@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/notion"
 	"github.com/aims519/timetrack-notion/internal/store"
 )
@@ -30,7 +31,7 @@ type RefreshResult struct {
 // AutoRefresh refreshes cached tasks if the last refresh was more than 10 minutes ago,
 // and is allowed to run for no more than 2 seconds. If this timeout is exceeded or any
 // other failure is encountered, further refresh attempts are blocked for 1 minute
-func AutoRefresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, tasksDataSourceID, projectsDataSourceID string) (RefreshResult, error) {
+func AutoRefresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, tasksDataSourceID, projectsDataSourceID string, taskPropertyMappings map[string]string) (RefreshResult, error) {
 	nowUTC := c.NowUTC()
 
 	cacheState, err := s.CacheState(ctx)
@@ -51,11 +52,15 @@ func AutoRefresh(ctx context.Context, c clock, s *store.Store, n notionPageFetch
 	// Incremental refresh (full = false), capped at 2 seconds
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	return Refresh(ctx, c, s, n, tasksDataSourceID, projectsDataSourceID, false)
+	return Refresh(ctx, c, s, n, tasksDataSourceID, projectsDataSourceID, false, taskPropertyMappings)
 }
 
-func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, tasksDataSourceID, projectsDataSourceID string, full bool) (result RefreshResult, err error) {
+func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, tasksDataSourceID, projectsDataSourceID string, full bool, taskPropertyMappings map[string]string) (result RefreshResult, err error) {
 	nowUTC := c.NowUTC()
+
+	if taskPropertyMappings == nil {
+		return RefreshResult{}, &clierr.Error{Code: clierr.NotInitialised, Message: "Notion task data source property mappings not found, run 'tt init'"}
+	}
 
 	// Fetch last refresh from DB
 	cacheState, err := s.CacheState(ctx)
@@ -76,7 +81,7 @@ func Refresh(ctx context.Context, c clock, s *store.Store, n notionPageFetcher, 
 		return RefreshResult{}, err
 	}
 
-	tasks, err := fetchNotionTasks(ctx, n, tasksDataSourceID, cacheState.TasksRefreshedAt, full)
+	tasks, err := fetchNotionTasks(ctx, n, tasksDataSourceID, cacheState.TasksRefreshedAt, full, taskPropertyMappings)
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -113,7 +118,7 @@ func fetchNotionProjects(ctx context.Context, n notionPageFetcher, dataSourceID 
 	return projects, nil
 }
 
-func fetchNotionTasks(ctx context.Context, n notionPageFetcher, dataSourceID string, tasksLastRefreshed *time.Time, full bool) ([]store.Task, error) {
+func fetchNotionTasks(ctx context.Context, n notionPageFetcher, dataSourceID string, tasksLastRefreshed *time.Time, full bool, taskPropertyMap map[string]string) ([]store.Task, error) {
 	// Fetch tasks since last refresh
 	var sinceTime *time.Time
 	if tasksLastRefreshed != nil && !full {
@@ -127,24 +132,17 @@ func fetchNotionTasks(ctx context.Context, n notionPageFetcher, dataSourceID str
 
 	tasks := make([]store.Task, len(pages))
 	for i, p := range pages {
-		tasks[i] = mapPageToTask(p, store.DefaultContextID)
+		tasks[i] = mapPageToTask(p, store.DefaultContextID, taskPropertyMap)
 	}
 
 	return tasks, nil
 }
 
-func mapPageToTask(p notion.Page, contextID string) store.Task {
-	var name string
-	if prop, ok := p.Properties["Task"]; ok && prop.Type == "title" {
-		var sb strings.Builder
-		for _, t := range prop.Title {
-			sb.WriteString(t.PlainText)
-		}
-		name = sb.String()
-	}
+func mapPageToTask(p notion.Page, contextID string, taskPropertyMap map[string]string) store.Task {
+	name := pageTitle(p)
 
 	var projectID *string
-	if prop, ok := p.Properties["Project"]; ok && prop.Type == "relation" {
+	if prop, ok := p.Properties[taskPropertyMap["project"]]; ok && prop.Type == "relation" {
 		if len(prop.Relation) > 0 {
 			sanitisedProjectID := store.SanitiseID(prop.Relation[0].ID)
 			projectID = &sanitisedProjectID
@@ -152,12 +150,12 @@ func mapPageToTask(p notion.Page, contextID string) store.Task {
 	}
 
 	var orderNum *float64
-	if prop, ok := p.Properties["Order"]; ok && prop.Type == "number" {
+	if prop, ok := p.Properties[taskPropertyMap["order"]]; ok && prop.Type == "number" {
 		orderNum = prop.Number
 	}
 
 	var done bool
-	if prop, ok := p.Properties["Done"]; ok && prop.Type == "checkbox" {
+	if prop, ok := p.Properties[taskPropertyMap["done"]]; ok && prop.Type == "checkbox" {
 		done = prop.Checkbox
 	}
 
@@ -173,18 +171,28 @@ func mapPageToTask(p notion.Page, contextID string) store.Task {
 }
 
 func mapPageToProject(p notion.Page, contextID string) store.Project {
-	var name string
-	if prop, ok := p.Properties["Project name"]; ok && prop.Type == "title" {
-		var sb strings.Builder
-		for _, t := range prop.Title {
-			sb.WriteString(t.PlainText)
-		}
-		name = sb.String()
-	}
-
+	name := pageTitle(p)
 	return store.Project{
 		ContextID: contextID,
 		PageID:    store.SanitiseID(p.ID),
 		Name:      name,
 	}
+}
+
+// pageTitle looks up a Notion page's one and only title property and returns its value
+func pageTitle(p notion.Page) string {
+	var title string
+	for _, prop := range p.Properties {
+		// Exactly one title expected
+		if prop.Type == "title" {
+			var sb strings.Builder
+			for _, t := range prop.Title {
+				sb.WriteString(t.PlainText)
+			}
+			title = sb.String()
+			break
+		}
+	}
+
+	return title
 }

@@ -145,6 +145,9 @@ func dataSourcePageRequest(ctx context.Context, url, startCursor, apiVersion, ap
 	return qr.Results, qr.NextCursor, qr.HasMore, nil
 }
 
+// LookupDataSourceID queries Notion for the data source ID associated with a database.
+// If a database has more than one data source, an error is returned along with the
+// candidates
 func (c *Client) LookupDataSourceID(ctx context.Context, databaseID string) (*string, error) {
 	type dataSource struct {
 		ID   string `json:"id"`
@@ -203,4 +206,38 @@ func (c *Client) LookupDataSourceID(ctx context.Context, databaseID string) (*st
 	}
 
 	return &dbResult.DataSources[0].ID, nil
+}
+
+func (c *Client) GetDataSource(ctx context.Context, dataSourceID string) (DataSource, error) {
+	url := fmt.Sprintf("%s/data_sources/%s", c.baseURL, dataSourceID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return DataSource{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+	addDefaultHeaders(req, c.apiVersion, c.apiToken)
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return DataSource{}, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
+	}
+	defer res.Body.Close()
+
+	bytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return DataSource{}, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+	}
+
+	err = handleErrorResponse(res, bytes)
+	if err != nil {
+		return DataSource{}, err
+	}
+
+	var dsResult DataSource
+	err = json.Unmarshal(bytes, &dsResult)
+	if err != nil {
+		return DataSource{}, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	}
+
+	return dsResult, nil
 }

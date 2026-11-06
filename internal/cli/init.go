@@ -103,8 +103,7 @@ func newInitCmd(a *app) *cobra.Command {
 			updatedContext := mergeNotionContextChanges(&currentNotionContext,
 				&resolvedProjectsDataSourceID,
 				&resolvedTasksDataSourceID,
-				taskProps,
-				nil)
+				taskProps)
 			err = a.db.SaveNotionContext(cmd.Context(), currentNotionContext)
 			if err != nil {
 				return err
@@ -128,19 +127,12 @@ func newInitCmd(a *app) *cobra.Command {
 	return initCmd
 }
 
-func mergeNotionContextChanges(nc *store.NotionContext, projectsDataSourceID, tasksDataSourceID *string, tasksPropertyMappings, projectsPropertyMappings map[string]string) store.NotionContext {
+func mergeNotionContextChanges(nc *store.NotionContext, projectsDataSourceID, tasksDataSourceID *string, tasksPropertyMappings map[string]string) store.NotionContext {
 	nc.TasksDataSourceID = tasksDataSourceID
 	nc.ProjectsDataSourceID = projectsDataSourceID
 
-	// Property map always replaced fully since tasks and project lookups are always made together
-	propertyMap := map[string]string{}
-	for key, val := range tasksPropertyMappings {
-		propertyMap[key] = val
-	}
-	for key, val := range projectsPropertyMappings {
-		propertyMap[key] = val
-	}
-	nc.PropertyMap = propertyMap
+	// Property map always replaced fully
+	nc.PropertyMap = tasksPropertyMappings
 
 	return *nc
 }
@@ -158,20 +150,6 @@ func mapTaskProperties(ctx context.Context, nc *notion.Client, tasksDataSourceID
 	results := map[string]string{}
 
 	for _, k := range keys {
-		if k == "task" {
-			// Exactly one property with type == "title"
-			titleProps := filterDataSourcePropertiesByType(ds.Properties, "title")
-			if len(titleProps) != 1 {
-				return nil, warnings, &clierr.Error{Code: clierr.NotFound, Message: "invalid tasks data source: no \"title\" property found", Details: map[string]any{"data_source_id": tasksDataSourceID}}
-			}
-
-			for key := range titleProps {
-				results[k] = key
-			}
-
-			continue
-		}
-
 		if k == "project" {
 			// Find relation that matches the projects data source ID
 			relProps := filterDataSourcePropertiesByType(ds.Properties, "relation")

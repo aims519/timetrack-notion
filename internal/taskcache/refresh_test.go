@@ -33,6 +33,9 @@ const (
 	testProjectsDataSourceID = "5678"
 )
 
+// testPropertyMap is the property map init builds for a tasks database using the default names
+var testPropertyMap = map[string]string{"project": "Project", "order": "Order", "done": "Done"}
+
 // fakeNotionFetcher records the tasks query and the projects query separately, so a test can
 // check each one whichever order Refresh makes them in
 type fakeNotionFetcher struct {
@@ -95,7 +98,7 @@ func TestRefresh_IncrementalRefreshFetcherError(t *testing.T) {
 	st := openTestStore(t)
 	fetcher := fakeNotionFetcher{pages: []notion.Page{}, err: &clierr.Error{Code: clierr.Offline, Message: "notion unreachable"}}
 
-	_, err := Refresh(t.Context(), c, st, &fetcher, testTasksDataSourceID, testProjectsDataSourceID, false)
+	_, err := Refresh(t.Context(), c, st, &fetcher, testTasksDataSourceID, testProjectsDataSourceID, false, testPropertyMap)
 	if err == nil {
 		t.Fatalf("Refresh() error = nil, want clierr.Error")
 	}
@@ -134,7 +137,7 @@ func TestRefresh_FirstIncrementalRefresh(t *testing.T) {
 	pages[1] = notion.Page{ID: "page-2", LastEditedTimeUTC: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}
 	fetcher := fakeNotionFetcher{pages: pages}
 
-	res, err := Refresh(t.Context(), c, st, &fetcher, testTasksDataSourceID, testProjectsDataSourceID, false)
+	res, err := Refresh(t.Context(), c, st, &fetcher, testTasksDataSourceID, testProjectsDataSourceID, false, testPropertyMap)
 	if err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
@@ -276,7 +279,7 @@ func TestMapPageToTask(t *testing.T) {
 				"properties": {`+tc.properties+`}
 			}`)
 
-			got := mapPageToTask(p, testContextID)
+			got := mapPageToTask(p, testContextID, testPropertyMap)
 
 			if got.ContextID != testContextID {
 				t.Errorf("ContextID = %q, want %q", got.ContextID, testContextID)
@@ -383,7 +386,7 @@ func TestMapPageToTask_OrderAndDone(t *testing.T) {
 				"properties": {`+tc.properties+`}
 			}`)
 
-			got := mapPageToTask(p, testContextID)
+			got := mapPageToTask(p, testContextID, testPropertyMap)
 
 			switch {
 			case tc.wantOrder == nil && got.SortOrder != nil:
@@ -401,6 +404,170 @@ func TestMapPageToTask_OrderAndDone(t *testing.T) {
 	}
 }
 
+// Properties are read by the names in the map, and the title is found by type whatever its name
+func TestMapPageToTask_UsesPropertyMap(t *testing.T) {
+	const (
+		projectID     = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		wantProjectID = "aaaaaaaabbbbccccddddeeeeeeeeeeee"
+		title         = `"Name": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": "Write tests"}]}`
+	)
+	// The same values under the default names and under other names
+	properties := func(project, order, done string) string {
+		return `"` + project + `": {"id": "p1", "type": "relation", "relation": [{"id": "` + projectID + `"}], "has_more": false},
+			"` + order + `": {"id": "o1", "type": "number", "number": 4.5},
+			"` + done + `": {"id": "d1", "type": "checkbox", "checkbox": true}`
+	}
+	renamed := map[string]string{"project": "Client work", "order": "Rank", "done": "Complete"}
+
+	tests := []struct {
+		name        string
+		properties  string // the JSON inside "properties": {...}
+		propertyMap map[string]string
+		wantProject *string
+		wantOrder   *float64
+		wantDone    bool
+	}{
+		{
+			name:        "default_names",
+			properties:  properties("Project", "Order", "Done"),
+			propertyMap: testPropertyMap,
+			wantProject: ptr(wantProjectID),
+			wantOrder:   ptr(4.5),
+			wantDone:    true,
+		},
+		{
+			name:        "other_names",
+			properties:  properties("Client work", "Rank", "Complete"),
+			propertyMap: renamed,
+			wantProject: ptr(wantProjectID),
+			wantOrder:   ptr(4.5),
+			wantDone:    true,
+		},
+		{
+			name:        "default_names_ignored_when_mapped_elsewhere",
+			properties:  properties("Project", "Order", "Done"),
+			propertyMap: renamed,
+		},
+		{
+			// A database with no Order property has no order key in its map
+			name:        "order_not_mapped",
+			properties:  properties("Project", "Order", "Done"),
+			propertyMap: map[string]string{"project": "Project", "done": "Done"},
+			wantProject: ptr(wantProjectID),
+			wantDone:    true,
+		},
+		{
+			// Why callers must not refresh before init has stored a map: nothing is read, and
+			// there's no error to show it
+			name:       "nil_map",
+			properties: properties("Project", "Order", "Done"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := decodePage(t, `{
+				"object": "page",
+				"id": "11111111-2222-3333-4444-555555555555",
+				"created_time": "2026-11-02T09:00:00.000Z",
+				"last_edited_time": "2026-11-02T09:00:00.000Z",
+				"in_trash": false,
+				"properties": {`+title+`,`+tc.properties+`}
+			}`)
+
+			got := mapPageToTask(p, testContextID, tc.propertyMap)
+
+			if got.Name != "Write tests" {
+				t.Errorf("Name = %q, want %q", got.Name, "Write tests")
+			}
+
+			switch {
+			case tc.wantProject == nil && got.ProjectPageID != nil:
+				t.Errorf("ProjectPageID = %q, want nil", *got.ProjectPageID)
+			case tc.wantProject != nil && got.ProjectPageID == nil:
+				t.Errorf("ProjectPageID = nil, want %q", *tc.wantProject)
+			case tc.wantProject != nil && *got.ProjectPageID != *tc.wantProject:
+				t.Errorf("ProjectPageID = %q, want %q", *got.ProjectPageID, *tc.wantProject)
+			}
+
+			switch {
+			case tc.wantOrder == nil && got.SortOrder != nil:
+				t.Errorf("SortOrder = %v, want nil", *got.SortOrder)
+			case tc.wantOrder != nil && got.SortOrder == nil:
+				t.Errorf("SortOrder = nil, want %v", *tc.wantOrder)
+			case tc.wantOrder != nil && *got.SortOrder != *tc.wantOrder:
+				t.Errorf("SortOrder = %v, want %v", *got.SortOrder, *tc.wantOrder)
+			}
+
+			if got.Done != tc.wantDone {
+				t.Errorf("Done = %v, want %v", got.Done, tc.wantDone)
+			}
+		})
+	}
+}
+
+// The map a caller passes reaches the mapping, whichever way the refresh is started
+func TestRefresh_PassesPropertyMapThrough(t *testing.T) {
+	propertyMap := map[string]string{"project": "Client work", "order": "Rank", "done": "Complete"}
+
+	tests := []struct {
+		name    string
+		refresh func(t *testing.T, st *store.Store, fetcher *fakeNotionFetcher) (RefreshResult, error)
+	}{
+		{
+			name: "refresh",
+			refresh: func(t *testing.T, st *store.Store, fetcher *fakeNotionFetcher) (RefreshResult, error) {
+				return Refresh(t.Context(), fakeClock{nowUTC: firstRefreshAt}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID, false, propertyMap)
+			},
+		},
+		{
+			name: "auto_refresh",
+			refresh: func(t *testing.T, st *store.Store, fetcher *fakeNotionFetcher) (RefreshResult, error) {
+				return AutoRefresh(t.Context(), fakeClock{nowUTC: firstRefreshAt}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID, propertyMap)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t)
+			fetcher := &fakeNotionFetcher{pages: []notion.Page{{
+				ID:                "page-1",
+				LastEditedTimeUTC: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC),
+				Properties: map[string]notion.PageProperty{
+					"Name":        {Type: "title", Title: []notion.RichText{{PlainText: "Write tests"}}},
+					"Client work": {Type: "relation", Relation: []notion.Relation{{ID: "project-1"}}},
+					"Rank":        {Type: "number", Number: ptr(4.5)},
+					"Complete":    {Type: "checkbox", Checkbox: true},
+				},
+			}}}
+
+			if _, err := tc.refresh(t, st, fetcher); err != nil {
+				t.Fatalf("refresh error = %v", err)
+			}
+
+			tasks, _, err := st.ListTasks(t.Context(), store.NoLimit, true, nil)
+			if err != nil {
+				t.Fatalf("ListTasks() error = %v", err)
+			}
+			if len(tasks) != 1 {
+				t.Fatalf("got %d tasks, want 1", len(tasks))
+			}
+
+			got := tasks[0]
+			if got.ProjectPageID == nil || *got.ProjectPageID != "project1" {
+				t.Errorf("ProjectPageID = %v, want %q", got.ProjectPageID, "project1")
+			}
+			if got.SortOrder == nil || *got.SortOrder != 4.5 {
+				t.Errorf("SortOrder = %v, want 4.5", got.SortOrder)
+			}
+			if !got.Done {
+				t.Errorf("Done = false, want true")
+			}
+		})
+	}
+}
+
 func TestMapPageToTask_Times(t *testing.T) {
 	// created_time and last_edited_time differ, so a mix-up between them is caught
 	p := decodePage(t, `{
@@ -412,7 +579,7 @@ func TestMapPageToTask_Times(t *testing.T) {
 		"properties": {"Task": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": "Write tests"}]}}
 	}`)
 
-	got := mapPageToTask(p, testContextID)
+	got := mapPageToTask(p, testContextID, testPropertyMap)
 
 	wantEdited := time.Date(2026, 11, 2, 9, 15, 0, 0, time.UTC)
 	if !got.LastEditedTime.Equal(wantEdited) {
@@ -476,10 +643,10 @@ func TestMapPageToProject(t *testing.T) {
 			wantName:   "",
 		},
 		{
-			// A task's title property is named differently, so a project page doesn't take its name from it
-			name:       "task title property name isn't used",
-			properties: `"Task": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": "Not a project"}]}`,
-			wantName:   "",
+			// The title is found by type, because the projects database can call it anything
+			name:       "title found whatever its name",
+			properties: `"Name": {"id": "title", "type": "title", "title": [{"type": "text", "plain_text": "Sabbatical"}]}`,
+			wantName:   "Sabbatical",
 		},
 	}
 
@@ -527,7 +694,7 @@ func TestMapPageToProject_IDMatchesTaskProjectID(t *testing.T) {
 		"last_edited_time": "2026-11-02T09:00:00.000Z",
 		"in_trash": false,
 		"properties": {"Project": {"id": "p1", "type": "relation", "relation": [{"id": "`+projectID+`"}], "has_more": false}}
-	}`), testContextID)
+	}`), testContextID, testPropertyMap)
 
 	project := mapPageToProject(decodePage(t, `{
 		"object": "page",
@@ -583,7 +750,7 @@ func pagesWithIDs(ids ...string) []notion.Page {
 // arguments are recorded separately
 func refreshOnce(t *testing.T, st *store.Store, now time.Time, fetcher *fakeNotionFetcher, full bool) (RefreshResult, error) {
 	t.Helper()
-	return Refresh(t.Context(), fakeClock{nowUTC: now}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID, full)
+	return Refresh(t.Context(), fakeClock{nowUTC: now}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID, full, testPropertyMap)
 }
 
 // checkTime fails the test unless got and want are both nil, or both set to the same instant
@@ -793,7 +960,7 @@ func TestRefresh_CancelledFetchDoesNotRecordFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	_, err := Refresh(ctx, fakeClock{nowUTC: firstRefreshAt}, st, &cancellingFetcher{cancel: cancel}, testTasksDataSourceID, testProjectsDataSourceID, false)
+	_, err := Refresh(ctx, fakeClock{nowUTC: firstRefreshAt}, st, &cancellingFetcher{cancel: cancel}, testTasksDataSourceID, testProjectsDataSourceID, false, testPropertyMap)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Refresh() error = %v, want context.Canceled", err)
 	}
@@ -823,7 +990,7 @@ func TestRefresh_TimedOutFetchRecordsFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := Refresh(ctx, fakeClock{nowUTC: firstRefreshAt}, st, slowFetcher{}, testTasksDataSourceID, testProjectsDataSourceID, false)
+	_, err := Refresh(ctx, fakeClock{nowUTC: firstRefreshAt}, st, slowFetcher{}, testTasksDataSourceID, testProjectsDataSourceID, false, testPropertyMap)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Refresh() error = %v, want context.DeadlineExceeded", err)
 	}
@@ -868,7 +1035,7 @@ func TestRefresh_CacheStateUnreadable_DoesNotFetch(t *testing.T) {
 
 func autoRefreshOnce(t *testing.T, st *store.Store, now time.Time, fetcher notionPageFetcher) (RefreshResult, error) {
 	t.Helper()
-	return AutoRefresh(t.Context(), fakeClock{nowUTC: now}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID)
+	return AutoRefresh(t.Context(), fakeClock{nowUTC: now}, st, fetcher, testTasksDataSourceID, testProjectsDataSourceID, testPropertyMap)
 }
 
 func TestAutoRefresh_DecidesWhetherToRefresh(t *testing.T) {

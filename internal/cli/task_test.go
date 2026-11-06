@@ -67,6 +67,65 @@ func TestRun_TaskRefresh_Errors(t *testing.T) {
 	}
 }
 
+// A context with data sources but no property map can't read tasks correctly: every task would look
+// open, with no project. So it counts as not connected, and nothing is fetched
+func TestRun_TaskRefresh_NoPropertyMap_ReturnsNotInitialised(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "incremental", args: []string{"task", "refresh"}},
+		{name: "full", args: []string{"task", "refresh", "--full"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, requested := fakeNotion(t, map[string]notionResponse{})
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
+
+			exit, stdout, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), tc.args...)
+
+			checkInitError(t, exit, stdout, stderr, 5, clierr.NotInitialised)
+
+			if got := requested(); len(got) != 0 {
+				t.Errorf("paths requested = %v, want none", got)
+			}
+			checkCacheStateUntouched(t, dbPath)
+		})
+	}
+}
+
+// task list treats a context with no property map as it does one with no data sources: it lists
+// from the cache without refreshing or warning
+func TestRun_TaskList_NoPropertyMap_SkipsRefresh(t *testing.T) {
+	s, requested := fakeNotion(t, map[string]notionResponse{})
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	seedDataSources(t, dbPath, mapTasksDataSourceID, mapProjectsDataSourceID)
+
+	exit, stdout, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), "task", "list")
+	if exit != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
+	}
+
+	if got := requested(); len(got) != 0 {
+		t.Errorf("paths requested = %v, want none", got)
+	}
+
+	var doc struct {
+		Warnings []struct {
+			Code string `json:"code"`
+		} `json:"warnings"`
+	}
+	if err := json.Unmarshal(stdout, &doc); err != nil {
+		t.Fatalf("unable to decode document %q: %v", stdout, err)
+	}
+	if len(doc.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none", doc.Warnings)
+	}
+	checkCacheStateUntouched(t, dbPath)
+}
+
 // setNotionToken sets NOTION_TOKEN to token for the test, or unsets it if token is nil.
 // Either way the developer's own value is restored afterwards
 func setNotionToken(t *testing.T, token *string) {

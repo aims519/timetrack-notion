@@ -93,6 +93,15 @@ func runInit(t *testing.T, baseURL string, client *http.Client, args ...string) 
 func runInitOnDB(t *testing.T, dbPath, baseURL string, client *http.Client, args ...string) (int, []byte, []byte) {
 	t.Helper()
 
+	return runAgainstNotion(t, dbPath, baseURL, client, append([]string{"init"}, args...)...)
+}
+
+// runAgainstNotion runs tt with args and JSON output, using the database at dbPath and the Notion
+// at baseURL. Use it rather than runTT for anything that could call Notion, because runTT uses the
+// live URL
+func runAgainstNotion(t *testing.T, dbPath, baseURL string, client *http.Client, args ...string) (int, []byte, []byte) {
+	t.Helper()
+
 	t.Setenv("TT_DB", dbPath)
 	t.Setenv("TT_TIMEZONE", "UTC")
 	setNotionToken(t, ptr(initTestToken))
@@ -101,7 +110,7 @@ func runInitOnDB(t *testing.T, dbPath, baseURL string, client *http.Client, args
 	a := &app{format: &format, notionBaseURL: baseURL, notionHTTPClient: client}
 
 	var stdout, stderr bytes.Buffer
-	fullArgs := append(append([]string{"init"}, args...), "--output", "json")
+	fullArgs := append(slices.Clone(args), "--output", "json")
 	exit := run(t.Context(), a, fullArgs, &stdout, &stderr)
 
 	return exit, stdout.Bytes(), stderr.Bytes()
@@ -743,11 +752,10 @@ func checkPropertyNotFound(t *testing.T, got map[string]string, err error) {
 	}
 }
 
-func TestMapTaskProperties_FindsTaskAndProject(t *testing.T) {
+func TestMapTaskProperties_FindsProject(t *testing.T) {
 	tests := []struct {
 		name        string
 		properties  []string
-		wantTask    string
 		wantProject string
 	}{
 		{
@@ -758,20 +766,6 @@ func TestMapTaskProperties_FindsTaskAndProject(t *testing.T) {
 				orderProperty,
 				doneProperty,
 			},
-			wantTask:    "Task",
-			wantProject: "Project",
-		},
-		{
-			// Name is what Notion calls the title in a new database
-			name: "title_found_by_type_not_name",
-			properties: []string{
-				titleProperty("Name"),
-				relationProperty("Project", mapProjectsDataSourceID),
-				notesProperty,
-				orderProperty,
-				doneProperty,
-			},
-			wantTask:    "Name",
 			wantProject: "Project",
 		},
 		{
@@ -782,7 +776,6 @@ func TestMapTaskProperties_FindsTaskAndProject(t *testing.T) {
 				notesProperty,
 				doneProperty,
 			},
-			wantTask:    "Task",
 			wantProject: "Client work",
 		},
 		{
@@ -794,7 +787,6 @@ func TestMapTaskProperties_FindsTaskAndProject(t *testing.T) {
 				relationProperty("Owner", mapOtherDataSourceID),
 				doneProperty,
 			},
-			wantTask:    "Task",
 			wantProject: "Client work",
 		},
 	}
@@ -808,11 +800,12 @@ func TestMapTaskProperties_FindsTaskAndProject(t *testing.T) {
 			}
 
 			// Checked key by key because order and done have their own tests
-			if got["task"] != tt.wantTask {
-				t.Errorf("task = %q, want %q", got["task"], tt.wantTask)
-			}
 			if got["project"] != tt.wantProject {
 				t.Errorf("project = %q, want %q", got["project"], tt.wantProject)
+			}
+			// Task names are read from a page's title by type, so aren't mapped (DESIGN.md §4)
+			if name, ok := got["task"]; ok {
+				t.Errorf("task = %q, want no key", name)
 			}
 		})
 	}
@@ -823,14 +816,6 @@ func TestMapTaskProperties_PropertyNotFound(t *testing.T) {
 		name       string
 		properties []string
 	}{
-		{
-			name: "no_title",
-			properties: []string{
-				relationProperty("Project", mapProjectsDataSourceID),
-				notesProperty,
-				doneProperty,
-			},
-		},
 		{
 			name: "no_relations",
 			properties: []string{

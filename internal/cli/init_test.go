@@ -1707,6 +1707,50 @@ func TestRun_Init_Rerun_DoesNotCreateAgain(t *testing.T) {
 	checkEntriesDataSource(t, dbPath, entriesDataSourceID)
 }
 
+// Entries timed before connecting stay as they were, and init reports them as waiting (DESIGN.md §4, §5)
+func TestRun_Init_ReportsWaitingEntries(t *testing.T) {
+	tests := []struct {
+		name   string
+		before [][]string
+		want   float64
+	}{
+		{name: "no_entries", want: 0},
+		{
+			name:   "stopped_and_running",
+			before: [][]string{{"start", "first"}, {"stop"}, {"start", "second"}},
+			want:   2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := connectedNotion(t, fullTasksSchema())
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+
+			for _, args := range tc.before {
+				exit, _, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), args...)
+				if exit != 0 {
+					t.Fatalf("%v: exit code = %d, want 0 (stderr: %q)", args, exit, stderr)
+				}
+			}
+
+			exit, stdout, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage("--tasks-db", tasksDatabaseID, "--projects-db", projectsDatabaseID)...)
+			if exit != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
+			}
+
+			// Decoded into a map because 0 is the zero value, so a struct couldn't show the key is present
+			var doc map[string]any
+			if err := json.Unmarshal(stdout, &doc); err != nil {
+				t.Fatalf("unable to decode document %q: %v", stdout, err)
+			}
+			if got, ok := doc["waiting"]; !ok || got != tc.want {
+				t.Errorf("waiting = %v (present: %v), want %v", got, ok, tc.want)
+			}
+		})
+	}
+}
+
 // A stored entries database that can't be used stops init before it refreshes or saves anything.
 // Every case passes --parent-page, because replacing the database could strand rows already synced,
 // so the flag must never create a new one

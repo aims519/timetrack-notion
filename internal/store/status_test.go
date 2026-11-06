@@ -257,3 +257,48 @@ func TestReadStatus_CountSummary(t *testing.T) {
 		})
 	}
 }
+
+func TestWaitingEntriesCount(t *testing.T) {
+	const start = "2026-10-01T09:00:00.000000000Z"
+	const end = "2026-10-01T10:00:00.000000000Z"
+	const task = "3e73b23e-0000-0000-0000-000000000000"
+	// The running entry's ID is scanned into a uuid.UUID, so it must be one
+	const runningID = "11111111-1111-1111-1111-111111111111"
+
+	tests := []struct {
+		name    string
+		entries []statusEntry
+		want    int
+	}{
+		{"no_entries", nil, 0},
+		{"stopped_no_task", []statusEntry{{id: "a", start: start, end: end}}, 1},
+		{"running_no_task", []statusEntry{{id: runningID, start: start}}, 1},
+		{"running_with_task", []statusEntry{{id: runningID, start: start, taskID: task}}, 1},
+		// Everything a sync needs is present, so it's pending rather than waiting
+		{"stopped_with_task", []statusEntry{{id: "a", start: start, end: end, taskID: task}}, 0},
+		{"tombstoned_stopped_no_task", []statusEntry{{id: "a", start: start, end: end, deletedAt: end}}, 0},
+		{"tombstoned_running", []statusEntry{{id: runningID, start: start, deletedAt: end}}, 0},
+		{"mixed", []statusEntry{
+			{id: "a", start: start, end: end},
+			{id: "b", start: start, end: end},
+			{id: "c", start: start, end: end, taskID: task},
+			{id: "d", start: start, end: end, deletedAt: end},
+			{id: runningID, start: end},
+		}, 3},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertStatusEntries(t, st, tc.entries)
+
+			got, err := st.WaitingEntriesCount(t.Context())
+			if err != nil {
+				t.Fatalf("WaitingEntriesCount() want nil error, got %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("WaitingEntriesCount() want %d, got %d", tc.want, got)
+			}
+		})
+	}
+}

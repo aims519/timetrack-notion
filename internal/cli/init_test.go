@@ -1833,6 +1833,94 @@ func TestRun_Init_ReportsWaitingEntries(t *testing.T) {
 	}
 }
 
+// storedEntries reads back the entries started in the last day, oldest first
+func storedEntries(t *testing.T, dbPath string) []store.Entry {
+	t.Helper()
+
+	now := time.Now()
+	var entries []store.Entry
+	onStore(t, dbPath, func(st *store.Store) {
+		status, err := st.ReadStatus(t.Context(), now.Add(-24*time.Hour), now.Add(24*time.Hour))
+		if err != nil {
+			t.Fatalf("ReadStatus(): %v", err)
+		}
+		entries = status.TodayEntries
+	})
+	return entries
+}
+
+// entriesJSON gives entries as text, because comparing them directly would compare the addresses
+// of their pointer fields, and a failure would print those addresses too
+func entriesJSON(t *testing.T, entries []store.Entry) string {
+	t.Helper()
+
+	b, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("encoding entries: %v", err)
+	}
+	return string(b)
+}
+
+// Connecting a context that's been used offline changes none of its entries: they stay as recorded,
+// with no task, and a running one keeps running (DESIGN.md §5)
+func TestRun_Init_EntriesRecordedBeforeInit_StayIntactAndUnattached(t *testing.T) {
+	s, _ := connectedNotion(t, fullTasksSchema())
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// The first entry is backdated so that the two can't start at the same moment
+	recorded := [][]string{{"start", "first", "--ago", "2h"}, {"stop"}, {"start", "second"}}
+	for _, args := range recorded {
+		exit, _, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), args...)
+		if exit != 0 {
+			t.Fatalf("%v: exit code = %d, want 0 (stderr: %q)", args, exit, stderr)
+		}
+	}
+	before := storedEntries(t, dbPath)
+
+	exit, _, stderr := runInitOnDB(t, dbPath, s.URL, s.Client(), withParentPage("--tasks-db", tasksDatabaseID, "--projects-db", projectsDatabaseID)...)
+	if exit != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", exit, stderr)
+	}
+
+	after := storedEntries(t, dbPath)
+
+	// Every field, so a change to the times, sync state or updated_at is caught as well
+	if got, want := entriesJSON(t, after), entriesJSON(t, before); got != want {
+		t.Errorf("entries after init:\n got %s\nwant %s", got, want)
+	}
+
+	if len(after) != 2 {
+		t.Fatalf("got %d entries, want 2: %s", len(after), entriesJSON(t, after))
+	}
+
+	wantEntries := []struct {
+		description string
+		running     bool
+	}{
+		{description: "first", running: false},
+		{description: "second", running: true},
+	}
+	for i, want := range wantEntries {
+		e := after[i]
+
+		if e.Description == nil || *e.Description != want.description {
+			t.Errorf("entry %d description isn't %q: %s", i, want.description, entriesJSON(t, after))
+		}
+		if running := e.EndUTC == nil; running != want.running {
+			t.Errorf("entry %d running = %v, want %v", i, running, want.running)
+		}
+		if e.TaskPageID != nil {
+			t.Errorf("entry %d task = %q, want none", i, *e.TaskPageID)
+		}
+		if e.EntryPageID != nil {
+			t.Errorf("entry %d Notion row = %q, want none", i, *e.EntryPageID)
+		}
+		if e.SyncState != "pending" {
+			t.Errorf("entry %d sync state = %q, want %q", i, e.SyncState, "pending")
+		}
+	}
+}
+
 // A stored entries database that can't be used stops init before it refreshes or saves anything.
 // Every case passes --parent-page, because replacing the database could strand rows already synced,
 // so the flag must never create a new one

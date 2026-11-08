@@ -24,7 +24,7 @@ func newAttachCmd(a *app) *cobra.Command {
 		Short: "Link a Notion task to a time entry. Task is matched based on the selector provided",
 		Long:  "If no --entry ID prefix is provided, defaults to the currently running entry, then the most recent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 && !a.canPrompt(cmd.InOrStdin(), cmd.OutOrStdout()) {
+			if len(args) == 0 && !a.canPrompt(cmd.InOrStdin(), cmd.ErrOrStderr()) {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] argument is required when prompts are disabled (no terminal or --no-input)"}
 			}
 
@@ -44,7 +44,9 @@ func newAttachCmd(a *app) *cobra.Command {
 					return &clierr.Error{Code: clierr.NotFound, Message: message}
 				}
 
-				pickerForm := taskPickerForm(allTasks, &selector)
+				pickerForm := taskPickerForm(allTasks, &selector).
+					WithInput(cmd.InOrStdin()).
+					WithOutput(cmd.ErrOrStderr())
 
 				err = pickerForm.RunWithContext(cmd.Context())
 				if errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {

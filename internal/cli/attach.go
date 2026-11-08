@@ -10,7 +10,6 @@ import (
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
-	"github.com/aims519/timetrack-notion/internal/taskcache"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 	"github.com/spf13/cobra"
 )
@@ -36,12 +35,7 @@ func newAttachCmd(a *app) *cobra.Command {
 			}
 
 			// Database lookup (full ID, short ID, order)
-			allTaskIDs, err := a.db.AllTaskIDs(cmd.Context())
-			if err != nil {
-				return err
-			}
-
-			shortIDMap, err := taskcache.ShortIDs(allTaskIDs)
+			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)
 			if err != nil {
 				return err
 			}
@@ -72,7 +66,7 @@ func newAttachCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			doc := output.NewEntryDoc(mapDBEntryWithShortTask(entry, shortIDMap), nil)
+			doc := output.NewEntryDoc(mapDBEntry(entry, shortIDMap), nil)
 			loc, err := timeparse.CurrentLocation()
 			if err != nil {
 				return err
@@ -90,7 +84,7 @@ func newAttachCmd(a *app) *cobra.Command {
 func ambiguousEntryError(selector string, candidates []store.Entry, shortIDMap map[string]string) *clierr.Error {
 	var mapped []output.Entry
 	for _, c := range candidates {
-		mapped = append(mapped, mapDBEntryWithShortTask(c, shortIDMap))
+		mapped = append(mapped, mapDBEntry(c, shortIDMap))
 	}
 	return &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique entry using selector", Details: map[string]any{"selector": selector, "candidates": mapped}}
 }

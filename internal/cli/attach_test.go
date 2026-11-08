@@ -369,3 +369,104 @@ func TestAmbiguousEntryError_CandidateValues(t *testing.T) {
 		t.Errorf("running candidate = %v, want %v", candidates[1], wantRunning)
 	}
 }
+
+// taskRefOutput is an entry's task as the JSON output gives it
+type taskRefOutput struct {
+	PageID  string `json:"page_id"`
+	ShortID string `json:"short_id"`
+	Name    string `json:"name"`
+}
+
+// Once a task is attached, every command that outputs the entry gives the task its short ID,
+// never an empty one (§8)
+func TestRun_AttachedEntry_TaskHasShortID(t *testing.T) {
+	// The only cached task, so its short ID is its last 6 characters
+	want := taskRefOutput{PageID: attachTaskID, ShortID: "123456", Name: "Write tests"}
+
+	tests := []struct {
+		name string
+		args []string
+		// task extracts the attached entry's task from the command's output
+		task func(t *testing.T, stdout []byte) *taskRefOutput
+	}{
+		{
+			name: "status_running",
+			args: []string{"status"},
+			task: func(t *testing.T, stdout []byte) *taskRefOutput {
+				var got struct {
+					Running *struct {
+						Task *taskRefOutput `json:"task"`
+					} `json:"running"`
+				}
+				if err := json.Unmarshal(stdout, &got); err != nil {
+					t.Fatalf("unable to decode status output %q: %v", stdout, err)
+				}
+				if got.Running == nil {
+					t.Fatalf("running want the attached entry, got null")
+				}
+				return got.Running.Task
+			},
+		},
+		{
+			name: "stop",
+			args: []string{"stop", "--at", "2026-01-01T10:00:00Z"},
+			task: func(t *testing.T, stdout []byte) *taskRefOutput {
+				var got struct {
+					Entry struct {
+						Task *taskRefOutput `json:"task"`
+					} `json:"entry"`
+				}
+				if err := json.Unmarshal(stdout, &got); err != nil {
+					t.Fatalf("unable to decode stop output %q: %v", stdout, err)
+				}
+				return got.Entry.Task
+			},
+		},
+		{
+			name: "start_switch_stopped",
+			args: []string{"start", "--switch", "next thing", "--at", "2026-01-01T10:00:00Z"},
+			task: func(t *testing.T, stdout []byte) *taskRefOutput {
+				var got struct {
+					Stopped *struct {
+						Task *taskRefOutput `json:"task"`
+					} `json:"stopped"`
+				}
+				if err := json.Unmarshal(stdout, &got); err != nil {
+					t.Fatalf("unable to decode start output %q: %v", stdout, err)
+				}
+				if got.Stopped == nil {
+					t.Fatalf("stopped want the attached entry, got null")
+				}
+				return got.Stopped.Task
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			t.Setenv("TT_DB", dbPath)
+			t.Setenv("TT_TIMEZONE", "UTC")
+			seedAttachTask(t, dbPath)
+
+			code, _, stderr := runTT(t, "start", "writing tests", "--at", "2026-01-01T09:00:00Z")
+			if code != 0 {
+				t.Fatalf("start = %d, want 0 (stderr: %q)", code, stderr)
+			}
+			code, _, stderr = runTT(t, "attach", attachTaskID)
+			if code != 0 {
+				t.Fatalf("attach = %d, want 0 (stderr: %q)", code, stderr)
+			}
+
+			code, stdout, stderr := runTT(t, tc.args...)
+			if code != 0 {
+				t.Fatalf("%s = %d, want 0 (stderr: %q)", tc.args[0], code, stderr)
+			}
+
+			got := tc.task(t, stdout)
+			if got == nil || *got != want {
+				t.Errorf("task = %+v, want %+v", got, want)
+			}
+		})
+	}
+}

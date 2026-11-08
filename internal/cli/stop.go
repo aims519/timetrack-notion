@@ -67,10 +67,15 @@ func validateStopFlags(s stopArgs, now time.Time, loc *time.Location) (time.Time
 }
 
 func executeStopUpdates(ctx context.Context, a *app, stopUTC time.Time) (output.StopDoc, error) {
+	shortIDMap, err := buildShortIDMap(ctx, a.db)
+	if err != nil {
+		return output.StopDoc{}, err
+	}
+
 	dbEntry, err := a.db.StopTimer(ctx, stopUTC)
 	if err != nil {
 		return output.StopDoc{}, err
 	}
 
-	return output.NewStopDoc(mapDBEntry(dbEntry), nil), nil
+	return output.NewStopDoc(mapDBEntry(dbEntry, shortIDMap), nil), nil
 }

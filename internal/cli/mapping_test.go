@@ -44,7 +44,7 @@ func TestMapDBEntry_RunningEntry(t *testing.T) {
 				UpdatedAt:   tc.startUTC,
 			}
 
-			got := mapDBEntry(e)
+			got := mapDBEntry(e, nil)
 
 			if got.ID != e.ID {
 				t.Errorf("ID want %q, got %q", e.ID, got.ID)
@@ -126,7 +126,7 @@ func TestMapDBEntry_StoppedEntry(t *testing.T) {
 				UpdatedAt: tc.endUTC,
 			}
 
-			got := mapDBEntry(e)
+			got := mapDBEntry(e, nil)
 
 			if got.End == nil {
 				t.Errorf("End want %s, got nil", tc.wantEnd)
@@ -167,7 +167,7 @@ func TestMapNullableDBEntry(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := mapNullableDBEntry(tc.entry)
+			got := mapNullableDBEntry(tc.entry, nil)
 
 			if tc.entry == nil {
 				if got != nil {
@@ -179,7 +179,7 @@ func TestMapNullableDBEntry(t *testing.T) {
 				t.Fatalf("want an entry, got nil")
 			}
 			// A non-nil entry maps exactly as mapDBEntry maps it
-			if want := mapDBEntry(*tc.entry); !reflect.DeepEqual(*got, want) {
+			if want := mapDBEntry(*tc.entry, nil); !reflect.DeepEqual(*got, want) {
 				t.Errorf("want %+v, got %+v", want, *got)
 			}
 		})
@@ -201,7 +201,7 @@ func TestMapDBStatus_NothingRunning(t *testing.T) {
 		CountSummary: store.CountSummary{Pending: 1, Blocked: 2, Waiting: 3},
 	}
 
-	got := mapDBStatus(s, now)
+	got := mapDBStatus(s, now, nil)
 
 	if got.Running != nil {
 		t.Errorf("Running want nil, got %+v", *got.Running)
@@ -258,7 +258,7 @@ func TestMapDBStatus_Running(t *testing.T) {
 			}
 			s := store.Status{Running: &running, TodayEntries: today}
 
-			got := mapDBStatus(s, tc.now)
+			got := mapDBStatus(s, tc.now, nil)
 
 			if got.Running == nil {
 				t.Fatalf("Running want entry %q, got nil", runningID)
@@ -459,7 +459,8 @@ func TestMapDbTasks_Project(t *testing.T) {
 	}
 }
 
-func TestMapDBEntryWithShortTask(t *testing.T) {
+// mapDBEntry sets the task's short ID from the map, keyed by the task's page ID
+func TestMapDBEntry_Task(t *testing.T) {
 	const (
 		entryID    = "0605115f-a394-4b6d-a8f7-528408bbc44f"
 		taskPageID = "3f63b23e837922"
@@ -544,18 +545,36 @@ func TestMapDBEntryWithShortTask(t *testing.T) {
 				UpdatedAt:  end,
 			}
 
-			got := mapDBEntryWithShortTask(e, tc.shortIDMap)
+			got := mapDBEntry(e, tc.shortIDMap)
 
 			if !reflect.DeepEqual(got.Task, tc.want) {
 				t.Errorf("Task = %+v, want %+v", got.Task, tc.want)
 			}
-
-			// Everything other than the task is mapped as mapDBEntry maps it
-			want := mapDBEntry(e)
-			got.Task, want.Task = nil, nil
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("mapDBEntryWithShortTask() = %+v, want %+v", got, want)
-			}
 		})
+	}
+}
+
+// status passes the short ID map through to the running entry, so its task has a short ID
+func TestMapDBStatus_RunningTaskShortID(t *testing.T) {
+	const taskPageID = "3f63b23e837922"
+	start := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+	running := store.Entry{
+		ID:         "0605115f-a394-4b6d-a8f7-528408bbc44f",
+		StartUTC:   start,
+		TaskPageID: ptr(taskPageID),
+		TaskName:   ptr("Write the sync engine"),
+		SyncState:  "pending",
+		UpdatedAt:  start,
+	}
+	s := store.Status{Running: &running, TodayEntries: []store.Entry{running}}
+
+	got := mapDBStatus(s, start.Add(time.Hour), map[string]string{taskPageID: "837922"})
+
+	if got.Running == nil {
+		t.Fatalf("Running want entry %q, got nil", running.ID)
+	}
+	want := &output.TaskRef{PageID: taskPageID, ShortID: "837922", Name: "Write the sync engine"}
+	if !reflect.DeepEqual(got.Running.Task, want) {
+		t.Errorf("Running.Task = %+v, want %+v", got.Running.Task, want)
 	}
 }

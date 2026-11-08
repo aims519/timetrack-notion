@@ -44,5 +44,10 @@ func executeStatusUpdates(ctx context.Context, a *app, nowUTC time.Time, loc *ti
 		return output.StatusDoc{}, err
 	}
 
-	return mapDBStatus(dbStatus, nowUTC), nil
+	shortIDMap, err := buildShortIDMap(ctx, a.db)
+	if err != nil {
+		return output.StatusDoc{}, err
+	}
+
+	return mapDBStatus(dbStatus, nowUTC, shortIDMap), nil
 }

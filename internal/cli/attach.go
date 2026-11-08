@@ -35,6 +35,15 @@ func newAttachCmd(a *app) *cobra.Command {
 				if err != nil {
 					return err
 				}
+
+				if len(allTasks) == 0 {
+					message := "no tasks available to attach, try running 'tt task refresh'"
+					if !all {
+						message += ". Or use --all in 'tt attach' to include completed tasks"
+					}
+					return &clierr.Error{Code: clierr.NotFound, Message: message}
+				}
+
 				pickerForm := taskPickerForm(allTasks, &selector)
 
 				err = pickerForm.RunWithContext(cmd.Context())

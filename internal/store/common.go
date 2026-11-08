@@ -66,6 +66,7 @@ func scanEntryRow(ctx context.Context, tx *sql.Tx, id uuid.UUID) (Entry, error) 
 	updated_at
 	FROM entries 
 	LEFT JOIN tasks ON entries.task_page_id = tasks.page_id
+		AND tasks.context_id = entries.context_id
 	WHERE id = ?`, id)
 
 	return scanEntry(row)

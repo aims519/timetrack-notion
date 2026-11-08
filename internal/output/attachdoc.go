@@ -24,13 +24,21 @@ func (d AttachDoc) WriteTable(w io.Writer, loc *time.Location) error {
 		return &clierr.Error{Code: clierr.Internal, Message: "task should not be null after an attach"}
 	}
 
+	var taskLabel string
+	if d.Entry.Task.ShortID != "" {
+		taskLabel = fmt.Sprintf("\"%s\" [task %s]", d.Entry.Task.Name, d.Entry.Task.ShortID)
+	} else {
+		taskLabel = fmt.Sprintf("\"%s\"", d.Entry.Task.Name)
+	}
+
 	var entryLabel string
 	if d.Entry.Description != nil {
 		entryLabel = fmt.Sprintf("\"%s\" (%s)", formatEntryLabel(d.Entry), formatEntryShortID(d.Entry))
 	} else {
 		entryLabel = formatEntryShortID(d.Entry)
 	}
-	_, err := fmt.Fprintf(w, "Attached \"%s\" to %s\n", d.Entry.Task.Name, entryLabel)
+
+	_, err := fmt.Fprintf(w, "Attached %s to %s\n", taskLabel, entryLabel)
 
 	return err
 }

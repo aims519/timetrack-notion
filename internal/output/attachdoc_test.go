@@ -65,23 +65,31 @@ func TestAttachDoc_WriteTable_WritesExpectedOutput(t *testing.T) {
 		id          string
 		description *string
 		taskName    string
+		taskShortID string
 		running     bool
 		want        string
 	}{
-		{"stopped_entry", fullID, ptr("writing tests"), "Write the sync engine", false,
-			`Attached "Write the sync engine" to "writing tests" (0605115)`},
+		// The task's short ID is labelled, so it can't be mistaken for the entry's
+		{"stopped_entry", fullID, ptr("writing tests"), "Write the sync engine", "837922", false,
+			`Attached "Write the sync engine" [task 837922] to "writing tests" (0605115)`},
 		// Attaching to the running entry reads the same; there's no time to show
-		{"running_entry", fullID, ptr("writing tests"), "Write the sync engine", true,
-			`Attached "Write the sync engine" to "writing tests" (0605115)`},
+		{"running_entry", fullID, ptr("writing tests"), "Write the sync engine", "837922", true,
+			`Attached "Write the sync engine" [task 837922] to "writing tests" (0605115)`},
 		// With no description to quote, the entry is named by its short ID alone
-		{"no_description", fullID, nil, "Write the sync engine", false,
-			`Attached "Write the sync engine" to 0605115`},
-		{"no_description_id_shorter_than_seven", "1234", nil, "Write the sync engine", false,
-			`Attached "Write the sync engine" to 1234`},
-		{"quotes_in_names", fullID, ptr(`say "hi"`), `Plan "v2"`, false,
-			`Attached "Plan "v2"" to "say "hi"" (0605115)`},
-		{"id_shorter_than_seven", "1234", ptr("writing tests"), "Write the sync engine", false,
-			`Attached "Write the sync engine" to "writing tests" (1234)`},
+		{"no_description", fullID, nil, "Write the sync engine", "837922", false,
+			`Attached "Write the sync engine" [task 837922] to 0605115`},
+		{"no_description_id_shorter_than_seven", "1234", nil, "Write the sync engine", "837922", false,
+			`Attached "Write the sync engine" [task 837922] to 1234`},
+		{"quotes_in_names", fullID, ptr(`say "hi"`), `Plan "v2"`, "837922", false,
+			`Attached "Plan "v2"" [task 837922] to "say "hi"" (0605115)`},
+		{"id_shorter_than_seven", "1234", ptr("writing tests"), "Write the sync engine", "837922", false,
+			`Attached "Write the sync engine" [task 837922] to "writing tests" (1234)`},
+		// Without a short ID there is nothing to label, rather than an empty "[task ]"
+		{"no_task_short_id", fullID, ptr("writing tests"), "Write the sync engine", "", false,
+			`Attached "Write the sync engine" to "writing tests" (0605115)`},
+		// A longer short ID, as when two cached tasks share a 6-character suffix, is shown in full
+		{"longer_task_short_id", fullID, ptr("writing tests"), "Write the sync engine", "e837922", false,
+			`Attached "Write the sync engine" [task e837922] to "writing tests" (0605115)`},
 	}
 
 	for _, tc := range tests {
@@ -90,7 +98,7 @@ func TestAttachDoc_WriteTable_WritesExpectedOutput(t *testing.T) {
 				ID:          tc.id,
 				Start:       NewUTCTime(start),
 				Description: tc.description,
-				Task:        &TaskRef{PageID: "3f63b23e837922", ShortID: "837922", Name: tc.taskName},
+				Task:        &TaskRef{PageID: "3f63b23e837922", ShortID: tc.taskShortID, Name: tc.taskName},
 				SyncState:   "pending",
 			}
 			if !tc.running {

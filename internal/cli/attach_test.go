@@ -470,3 +470,66 @@ func TestRun_AttachedEntry_TaskHasShortID(t *testing.T) {
 		})
 	}
 }
+
+// With no selector, attach opens the picker only if prompts are allowed. In tests stdout and
+// stderr are buffers, never terminals, so both cases fail as usage errors and leave the entry
+// unattached (§3, §8)
+func TestRun_Attach_NoSelectorWithoutPrompts_IsUsageError(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no_input_flag", args: []string{"attach", "--no-input"}},
+		{name: "no_terminal", args: []string{"attach"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			t.Setenv("TT_DB", dbPath)
+			t.Setenv("TT_TIMEZONE", "UTC")
+			seedAttachTask(t, dbPath)
+
+			code, _, stderr := runTT(t, "start", "writing tests", "--at", "2026-01-01T09:00:00Z")
+			if code != 0 {
+				t.Fatalf("start = %d, want 0 (stderr: %q)", code, stderr)
+			}
+
+			code, stdout, stderr := runTT(t, tc.args...)
+			if code != 2 {
+				t.Fatalf("attach = %d, want 2 (stdout: %q, stderr: %q)", code, stdout, stderr)
+			}
+			if len(stdout) != 0 {
+				t.Errorf("stdout want empty, got %q", stdout)
+			}
+
+			var got attachErrorOutput
+			if err := json.Unmarshal(stderr, &got); err != nil {
+				t.Fatalf("unable to decode attach error %q: %v", stderr, err)
+			}
+			if got.Error.Code != string(clierr.Usage) {
+				t.Errorf("error.code want %q, got %q", clierr.Usage, got.Error.Code)
+			}
+
+			// The running entry still has no task
+			code, stdout, stderr = runTT(t, "status")
+			if code != 0 {
+				t.Fatalf("status = %d, want 0 (stderr: %q)", code, stderr)
+			}
+			var status struct {
+				Running *struct {
+					Task *taskRefOutput `json:"task"`
+				} `json:"running"`
+			}
+			if err := json.Unmarshal(stdout, &status); err != nil {
+				t.Fatalf("unable to decode status output %q: %v", stdout, err)
+			}
+			if status.Running == nil {
+				t.Fatalf("running want the started entry, got null")
+			}
+			if status.Running.Task != nil {
+				t.Errorf("running.task want null, got %+v", status.Running.Task)
+			}
+		})
+	}
+}

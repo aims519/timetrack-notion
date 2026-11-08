@@ -170,11 +170,7 @@ func newListCmd(a *app) *cobra.Command {
 			}
 
 			// Fetch short ID mappings for all tasks
-			allIDs, err := a.db.AllTaskIDs(cmd.Context())
-			if err != nil {
-				return err
-			}
-			shortIDMap, err := taskcache.ShortIDs(allIDs)
+			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)
 			if err != nil {
 				return err
 			}

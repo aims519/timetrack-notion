@@ -8,6 +8,7 @@ type Entry struct {
 	StartUTC    time.Time
 	EndUTC      *time.Time
 	TaskPageID  *string
+	TaskName    *string
 	EntryPageID *string
 	SyncState   string
 	UpdatedAt   time.Time

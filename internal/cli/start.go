@@ -48,7 +48,12 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			startDoc, err := executeUpdates(cmd.Context(), a, sa, startUTC)
+			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)
+			if err != nil {
+				return err
+			}
+
+			startDoc, err := executeUpdates(cmd.Context(), a, sa, startUTC, shortIDMap)
 			if err != nil {
 				return err
 			}
@@ -105,15 +110,15 @@ func rejectUnimplemented(sa startArgs) error {
 	return nil
 }
 
-func executeUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time) (output.StartDoc, error) {
+func executeUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string) (output.StartDoc, error) {
 	if s.switchTask {
 		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, s.description)
 		if err != nil {
 			return output.StartDoc{}, err
 		}
 
-		return output.NewStartDoc(mapDBEntry(startedEntry),
-			mapNullableDBEntry(stoppedEntry), nil), nil
+		return output.NewStartDoc(mapDBEntry(startedEntry, shortIDMap),
+			mapNullableDBEntry(stoppedEntry, shortIDMap), nil), nil
 	}
 
 	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, s.description)
@@ -121,6 +126,6 @@ func executeUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time
 		return output.StartDoc{}, err
 	}
 
-	return output.NewStartDoc(mapDBEntry(dbEntry),
+	return output.NewStartDoc(mapDBEntry(dbEntry, shortIDMap),
 		nil, nil), nil
 }

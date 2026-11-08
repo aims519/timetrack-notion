@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
+	"github.com/aims519/timetrack-notion/internal/taskcache"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 )
 
@@ -12,18 +14,18 @@ const staleTimerThreshold = 12 * time.Hour
 
 // mapNullableDBEntry is a wrapper to handle cases where a result from
 // the DB may be nil
-func mapNullableDBEntry(e *store.Entry) *output.Entry {
+func mapNullableDBEntry(e *store.Entry, shortIDMap map[string]string) *output.Entry {
 	if e == nil {
 		return nil
 	}
 
-	result := mapDBEntry(*e)
+	result := mapDBEntry(*e, shortIDMap)
 	return &result
 }
 
 // mapDBEntry maps the properties of an Entry returned from
 // the store into an output.Entry
-func mapDBEntry(e store.Entry) output.Entry {
+func mapDBEntry(e store.Entry, shortIDMap map[string]string) output.Entry {
 	mapped := output.Entry{
 		ID:          e.ID,
 		Start:       output.NewUTCTime(e.StartUTC),
@@ -34,6 +36,13 @@ func mapDBEntry(e store.Entry) output.Entry {
 	if e.EndUTC != nil {
 		t := output.NewUTCTime(*e.EndUTC)
 		mapped.End = &t
+	}
+
+	if e.TaskPageID != nil && e.TaskName != nil {
+		mapped.Task = &output.TaskRef{PageID: *e.TaskPageID, Name: *e.TaskName}
+		if short, found := shortIDMap[*e.TaskPageID]; found {
+			mapped.Task.ShortID = short
+		}
 	}
 
 	mapped.Minutes = elapsedMinutes(e.StartUTC, e.EndUTC)
@@ -62,8 +71,8 @@ func elapsedSeconds(start time.Time, end *time.Time) *int {
 }
 
 // mapDBStatus maps a status retrieved from the store into an output format
-func mapDBStatus(s store.Status, nowUTC time.Time) output.StatusDoc {
-	runningEntry := mapNullableDBEntry(s.Running)
+func mapDBStatus(s store.Status, nowUTC time.Time, shortIDMap map[string]string) output.StatusDoc {
+	runningEntry := mapNullableDBEntry(s.Running, shortIDMap)
 	var runningElapsedSeconds int
 	if runningEntry != nil {
 		runningElapsedSeconds = *elapsedSeconds(s.Running.StartUTC, &nowUTC)
@@ -145,4 +154,15 @@ func mapDbTasks(inputs []store.Task, shortIDMap map[string]string, truncated boo
 	}
 
 	return output.NewTaskListDoc(tasks, truncated, w)
+}
+
+// buildShortIDMap returns a map of all task IDs to short IDs, used for constructing the
+// Entry output in several commands
+func buildShortIDMap(ctx context.Context, s *store.Store) (map[string]string, error) {
+	allTaskIDs, err := s.AllTaskIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return taskcache.ShortIDs(allTaskIDs)
 }

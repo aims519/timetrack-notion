@@ -5,17 +5,20 @@ import (
 	"errors"
 	"maps"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
 
-// Entry IDs are scanned into a uuid.UUID, so they must be real UUIDs. The first two share a
+// Entry IDs are scanned into a uuid.UUID, so they must be real UUIDs. The A entries share a
 // 7-character prefix, so "aaaaaaa" is ambiguous while "aaaaaaa1" is unique
 const (
 	entryA1 = "aaaaaaa1-0000-0000-0000-000000000001"
 	entryA2 = "aaaaaaa2-0000-0000-0000-000000000002"
+	entryA3 = "aaaaaaa3-0000-0000-0000-000000000005"
 	entryB  = "bbbbbbbb-0000-0000-0000-000000000003"
 	entryC  = "cccccccc-0000-0000-0000-000000000004"
 )
@@ -101,6 +104,16 @@ func checkAttachError(t *testing.T, err error, wantCode clierr.ErrorCode) map[st
 	}
 
 	return errcli.Details
+}
+
+// checkTaskNotFound checks err is ErrTaskNotFound. The store reports only that no task matched;
+// the CLI builds the not_found error with the selector as typed (§8)
+func checkTaskNotFound(t *testing.T, err error) {
+	t.Helper()
+
+	if !errors.Is(err, ErrTaskNotFound) {
+		t.Errorf("want ErrTaskNotFound, got %T: %v", err, err)
+	}
 }
 
 func TestAttachTaskToEntry_ResolvesEntry(t *testing.T) {
@@ -226,12 +239,6 @@ func TestAttachTaskToEntry_EntryErrors(t *testing.T) {
 			wantCode: clierr.NotFound,
 		},
 		{
-			name:     "ambiguous_prefix",
-			entries:  []attachEntry{{id: entryA1, start: early, end: middle}, {id: entryA2, start: middle}},
-			prefix:   "aaaaaaa",
-			wantCode: clierr.AmbiguousSelector,
-		},
-		{
 			name:     "prefix_of_deleted_entry",
 			entries:  []attachEntry{{id: entryB, start: early, end: middle, deletedAt: late}, {id: entryC, start: middle}},
 			prefix:   "bbbbbbb",
@@ -262,15 +269,107 @@ func TestAttachTaskToEntry_EntryErrors(t *testing.T) {
 				t.Errorf("ID want empty on error, got %q", got.ID)
 			}
 
-			// The format of candidates isn't settled for entries yet, so only their presence is checked
 			if tc.prefix != "" {
 				if sel := details["selector"]; sel != tc.prefix {
 					t.Errorf("Details selector want %q, got %v", tc.prefix, sel)
 				}
 			}
-			wantCandidates := tc.wantCode == clierr.AmbiguousSelector
-			if _, found := details["candidates"]; found != wantCandidates {
-				t.Errorf("Details candidates present want %v, got %v", wantCandidates, found)
+			if _, found := details["candidates"]; found {
+				t.Errorf("Details want no candidates for not_found, got %v", details)
+			}
+
+			if after := readStoredEntries(t, st); !maps.Equal(after, before) {
+				t.Errorf("entries want unchanged %+v, got %+v", before, after)
+			}
+		})
+	}
+}
+
+// An ambiguous entry prefix returns every live matching entry, read in full, so the CLI can list
+// them as entries (§3, §8, decision 27)
+func TestAttachTaskToEntry_AmbiguousEntryPrefix(t *testing.T) {
+	const (
+		early  = "2026-10-19T09:00:00.000000000Z"
+		middle = "2026-10-19T10:00:00.000000000Z"
+		late   = "2026-10-19T11:00:00.000000000Z"
+		ended  = "2026-10-19T12:00:00.000000000Z"
+	)
+
+	tests := []struct {
+		name           string
+		entries        []attachEntry
+		prefix         string
+		wantCandidates []string // sorted
+	}{
+		{
+			name: "two_matches",
+			entries: []attachEntry{
+				{id: entryA1, start: early, end: middle, description: "first"},
+				{id: entryA2, start: middle, description: "second"},
+				{id: entryB, start: late, end: ended},
+			},
+			prefix:         "aaaaaaa",
+			wantCandidates: []string{entryA1, entryA2},
+		},
+		// Every match is listed, not just enough to show it's ambiguous
+		{
+			name: "three_matches",
+			entries: []attachEntry{
+				{id: entryA1, start: early, end: middle, description: "first"},
+				{id: entryA2, start: middle, end: late, description: "second"},
+				{id: entryA3, start: late, description: "third"},
+			},
+			prefix:         "aaaaaaa",
+			wantCandidates: []string{entryA1, entryA2, entryA3},
+		},
+		// A deleted entry sharing the prefix isn't a candidate
+		{
+			name: "deleted_not_listed",
+			entries: []attachEntry{
+				{id: entryA1, start: early, end: middle, description: "first"},
+				{id: entryA2, start: middle, end: late, description: "second"},
+				{id: entryA3, start: late, end: ended, description: "third", deletedAt: ended},
+			},
+			prefix:         "aaaaaaa",
+			wantCandidates: []string{entryA1, entryA2},
+		},
+	}
+
+	wantDescriptions := map[string]string{entryA1: "first", entryA2: "second", entryA3: "third"}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListTasks(t, st, []listTask{{pageID: "task_open", name: "Open task"}})
+			insertAttachEntries(t, st, tc.entries)
+			before := readStoredEntries(t, st)
+
+			_, err := st.AttachTaskToEntry(t.Context(), tc.prefix, nil, ptr("task_open"), false, attachNow)
+
+			// The store returns the matching entries; the CLI turns them into entry documents
+			var ambErr *AmbiguousEntryError
+			if !errors.As(err, &ambErr) {
+				t.Fatalf("want *AmbiguousEntryError, got %T: %v", err, err)
+			}
+
+			gotIDs := make([]string, len(ambErr.Candidates))
+			for i, e := range ambErr.Candidates {
+				gotIDs[i] = e.ID
+			}
+			slices.Sort(gotIDs)
+			if !slices.Equal(gotIDs, tc.wantCandidates) {
+				t.Fatalf("Candidates = %q, want %q", gotIDs, tc.wantCandidates)
+			}
+
+			// Candidates are whole entries, not just IDs, so they can be shown as entries
+			for _, e := range ambErr.Candidates {
+				want := wantDescriptions[e.ID]
+				if e.Description == nil || *e.Description != want {
+					t.Errorf("candidate %s Description want %q, got %v", e.ID, want, e.Description)
+				}
+				if e.StartUTC.IsZero() {
+					t.Errorf("candidate %s StartUTC want set, got zero", e.ID)
+				}
 			}
 
 			if after := readStoredEntries(t, st); !maps.Equal(after, before) {
@@ -292,21 +391,20 @@ func TestAttachTaskToEntry_ResolvesTask(t *testing.T) {
 		order      *float64
 		taskID     *string
 		all        bool
-		wantTaskID string // empty when an error is wanted
-		wantCode   clierr.ErrorCode
+		wantTaskID string // empty when no task should be found
 	}{
 		{name: "id_open", taskID: ptr("task_open"), wantTaskID: "task_open"},
 		{name: "order_open", order: ptr(1.0), wantTaskID: "task_open"},
 		// IDs match the whole cache, done tasks included; --all only widens order numbers (§5)
 		{name: "id_done", taskID: ptr("task_done"), wantTaskID: "task_done"},
 		{name: "id_done_all", taskID: ptr("task_done"), all: true, wantTaskID: "task_done"},
-		{name: "order_done", order: ptr(2.0), wantCode: clierr.NotFound},
+		{name: "order_done", order: ptr(2.0)},
 		{name: "order_done_all", order: ptr(2.0), all: true, wantTaskID: "task_done"},
 		// Gone tasks never match
-		{name: "id_gone", taskID: ptr("task_gone"), wantCode: clierr.NotFound},
-		{name: "order_gone", order: ptr(3.0), all: true, wantCode: clierr.NotFound},
-		{name: "id_unknown", taskID: ptr("task_unknown"), wantCode: clierr.NotFound},
-		{name: "order_unknown", order: ptr(9.0), wantCode: clierr.NotFound},
+		{name: "id_gone", taskID: ptr("task_gone")},
+		{name: "order_gone", order: ptr(3.0), all: true},
+		{name: "id_unknown", taskID: ptr("task_unknown")},
+		{name: "order_unknown", order: ptr(9.0)},
 	}
 
 	for _, tc := range tests {
@@ -319,7 +417,7 @@ func TestAttachTaskToEntry_ResolvesTask(t *testing.T) {
 			got, err := st.AttachTaskToEntry(t.Context(), "", tc.order, tc.taskID, tc.all, attachNow)
 
 			if tc.wantTaskID == "" {
-				checkAttachError(t, err, tc.wantCode)
+				checkTaskNotFound(t, err)
 				if after := readStoredEntries(t, st); !maps.Equal(after, before) {
 					t.Errorf("entries want unchanged %+v, got %+v", before, after)
 				}
@@ -413,6 +511,199 @@ func TestAttachTaskToEntry_UpdatesEntry(t *testing.T) {
 			}
 			if stored := readStoredEntries(t, st)[entryB]; stored != want {
 				t.Errorf("stored entry want %+v, got %+v", want, stored)
+			}
+		})
+	}
+}
+
+func TestAttachTaskToEntry_OrderNumbers(t *testing.T) {
+	// Order numbers cover only the current project's open tasks, and match the whole cache
+	// when there is no default project, as in task list (§5)
+	tasks := []listTask{
+		{pageID: "p1_one", name: "P1 one", project: ptr("project1"), order: ptr(1.0)},
+		{pageID: "p2_one", name: "P2 one", project: ptr("project2"), order: ptr(1.0)},
+		{pageID: "none_two", name: "No project two", order: ptr(2.0)},
+		{pageID: "p1_three", name: "P1 three", project: ptr("project1"), order: ptr(3.0)},
+		{pageID: "p1_three_dup", name: "P1 three again", project: ptr("project1"), order: ptr(3.0)},
+		{pageID: "p1_four", name: "P1 four", project: ptr("project1"), order: ptr(4.0)},
+		{pageID: "p1_four_done", name: "P1 four done", project: ptr("project1"), order: ptr(4.0), done: true},
+		{pageID: "p1_five", name: "P1 five", project: ptr("project1"), order: ptr(5.0)},
+		{pageID: "p1_five_gone", name: "P1 five gone", project: ptr("project1"), order: ptr(5.0), gone: true},
+		{pageID: "p2_six", name: "P2 six", project: ptr("project2"), order: ptr(6.0)},
+	}
+
+	tests := []struct {
+		name           string
+		defaultProject *string
+		order          *float64
+		taskID         *string
+		all            bool
+		wantTaskID     string   // empty when no single task should be found
+		wantCandidates []string // page IDs, in any order, when the order is ambiguous; nil when not found
+	}{
+		// Another project's task with the same order doesn't count
+		{name: "same_order_other_project", defaultProject: ptr("project1"), order: ptr(1.0), wantTaskID: "p1_one"},
+		{name: "only_in_other_project", defaultProject: ptr("project1"), order: ptr(6.0)},
+		{name: "task_without_project", defaultProject: ptr("project1"), order: ptr(2.0)},
+		// With no default project, every project counts
+		{name: "no_default_unique", order: ptr(6.0), wantTaskID: "p2_six"},
+		{name: "no_default_task_without_project", order: ptr(2.0), wantTaskID: "none_two"},
+		{name: "no_default_across_projects", order: ptr(1.0), wantCandidates: []string{"p1_one", "p2_one"}},
+		{name: "duplicate_in_project", defaultProject: ptr("project1"), order: ptr(3.0), wantCandidates: []string{"p1_three", "p1_three_dup"}},
+		// Done and gone tasks don't make an order ambiguous, unless --all adds the done ones
+		{name: "duplicate_done", defaultProject: ptr("project1"), order: ptr(4.0), wantTaskID: "p1_four"},
+		{name: "duplicate_done_all", defaultProject: ptr("project1"), order: ptr(4.0), all: true, wantCandidates: []string{"p1_four", "p1_four_done"}},
+		{name: "duplicate_gone", defaultProject: ptr("project1"), order: ptr(5.0), all: true, wantTaskID: "p1_five"},
+		// IDs match the whole cache, whatever the current project
+		{name: "id_other_project", defaultProject: ptr("project1"), taskID: ptr("p2_six"), wantTaskID: "p2_six"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListTasks(t, st, tasks)
+			setDefaultProject(t, st, tc.defaultProject)
+			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
+			before := readStoredEntries(t, st)
+
+			got, err := st.AttachTaskToEntry(t.Context(), "", tc.order, tc.taskID, tc.all, attachNow)
+
+			if tc.wantTaskID == "" {
+				if tc.wantCandidates != nil {
+					// The store returns the matching tasks; the CLI turns them into task items (§8)
+					var ambErr *AmbiguousTaskError
+					if !errors.As(err, &ambErr) {
+						t.Fatalf("want *AmbiguousTaskError, got %T: %v", err, err)
+					}
+					gotIDs := listedPageIDs(ambErr.Candidates)
+					slices.Sort(gotIDs)
+					if !slices.Equal(gotIDs, tc.wantCandidates) {
+						t.Errorf("Candidates = %q, want %q", gotIDs, tc.wantCandidates)
+					}
+				} else {
+					checkTaskNotFound(t, err)
+				}
+
+				if after := readStoredEntries(t, st); !maps.Equal(after, before) {
+					t.Errorf("entries want unchanged %+v, got %+v", before, after)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
+			}
+			if got.TaskPageID == nil || *got.TaskPageID != tc.wantTaskID {
+				t.Errorf("TaskPageID want %q, got %v", tc.wantTaskID, got.TaskPageID)
+			}
+			if stored := readStoredEntries(t, st)[entryB].taskPageID; stored.String != tc.wantTaskID {
+				t.Errorf("stored task_page_id want %q, got %+v", tc.wantTaskID, stored)
+			}
+		})
+	}
+}
+
+// The candidates' projects come from the task's own context and leave out gone projects, as in
+// task list. A project cached under another context must not duplicate a task, which would
+// also make a unique order number look ambiguous
+func TestAttachTaskToEntry_OrderNumbers_CandidateProjects(t *testing.T) {
+	tasks := []listTask{
+		{pageID: "p1_a", name: "P1 a", project: ptr("project1"), order: ptr(1.0)},
+		{pageID: "p1_b", name: "P1 b", project: ptr("project1"), order: ptr(1.0)},
+		{pageID: "p2_a", name: "P2 a", project: ptr("project2"), order: ptr(2.0)},
+		{pageID: "p2_b", name: "P2 b", project: ptr("project2"), order: ptr(2.0)},
+		{pageID: "p1_c", name: "P1 c", project: ptr("project1"), order: ptr(3.0)},
+	}
+	projects := []listProject{
+		{pageID: "project1", name: "Sabbatical"},
+		{contextID: otherContextID, pageID: "project1", name: "Other context's name"},
+		{pageID: "project2", name: "Old", gone: true},
+	}
+
+	type candidate struct {
+		pageID      string
+		projectID   string
+		projectName *string
+	}
+
+	tests := []struct {
+		name           string
+		order          float64
+		wantTaskID     string      // empty when the order is ambiguous
+		wantCandidates []candidate // sorted by page ID
+	}{
+		{
+			name:  "project_in_two_contexts",
+			order: 1.0,
+			wantCandidates: []candidate{
+				{pageID: "p1_a", projectID: "project1", projectName: ptr("Sabbatical")},
+				{pageID: "p1_b", projectID: "project1", projectName: ptr("Sabbatical")},
+			},
+		},
+		{
+			// The task keeps its project ID; only the name is unknown
+			name:  "gone_project",
+			order: 2.0,
+			wantCandidates: []candidate{
+				{pageID: "p2_a", projectID: "project2"},
+				{pageID: "p2_b", projectID: "project2"},
+			},
+		},
+		{name: "unique_order_in_project_in_two_contexts", order: 3.0, wantTaskID: "p1_c"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertOtherContext(t, st)
+			insertListProjects(t, st, projects)
+			insertListTasks(t, st, tasks)
+			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
+
+			got, err := st.AttachTaskToEntry(t.Context(), "", ptr(tc.order), nil, false, attachNow)
+
+			if tc.wantTaskID != "" {
+				if err != nil {
+					t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
+				}
+				if got.TaskPageID == nil || *got.TaskPageID != tc.wantTaskID {
+					t.Errorf("TaskPageID want %q, got %v", tc.wantTaskID, got.TaskPageID)
+				}
+				return
+			}
+
+			var ambErr *AmbiguousTaskError
+			if !errors.As(err, &ambErr) {
+				t.Fatalf("want *AmbiguousTaskError, got %T: %v", err, err)
+			}
+
+			gotCandidates := make([]candidate, len(ambErr.Candidates))
+			for i, task := range ambErr.Candidates {
+				c := candidate{pageID: task.PageID, projectName: task.ProjectName}
+				if task.ProjectPageID != nil {
+					c.projectID = *task.ProjectPageID
+				}
+				gotCandidates[i] = c
+			}
+			slices.SortFunc(gotCandidates, func(a, b candidate) int { return strings.Compare(a.pageID, b.pageID) })
+
+			if len(gotCandidates) != len(tc.wantCandidates) {
+				described := make([]string, len(gotCandidates))
+				for i, c := range gotCandidates {
+					name := "<nil>"
+					if c.projectName != nil {
+						name = *c.projectName
+					}
+					described[i] = c.pageID + " in " + name
+				}
+				t.Fatalf("got %d candidates %q, want %d", len(gotCandidates), described, len(tc.wantCandidates))
+			}
+			for i, want := range tc.wantCandidates {
+				g := gotCandidates[i]
+				if g.pageID != want.pageID || g.projectID != want.projectID {
+					t.Errorf("candidate %d = %s in %q, want %s in %q", i, g.pageID, g.projectID, want.pageID, want.projectID)
+				}
+				checkStringPtr(t, want.pageID+" project name", g.projectName, want.projectName)
 			}
 		})
 	}

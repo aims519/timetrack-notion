@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/output"
+	"github.com/aims519/timetrack-notion/internal/store"
 	"github.com/aims519/timetrack-notion/internal/taskcache"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 	"github.com/spf13/cobra"
@@ -49,7 +52,22 @@ func newAttachCmd(a *app) *cobra.Command {
 			}
 
 			nowUTC := time.Now().UTC()
-			entry, err := a.db.AttachTaskToEntry(cmd.Context(), entryIDPrefix, order, taskID, all, nowUTC)
+			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), order, taskID, all, nowUTC)
+
+			var ambiguousTaskErr *store.AmbiguousTaskError
+			if errors.As(err, &ambiguousTaskErr) {
+				listDoc := mapDbTasks(ambiguousTaskErr.Candidates, shortIDMap, false, nil)
+				return &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique task", Details: map[string]any{"selector": selector, "candidates": listDoc.Tasks}}
+			}
+
+			var ambiguousEntryErr *store.AmbiguousEntryError
+			if errors.As(err, &ambiguousEntryErr) {
+				return ambiguousEntryError(entryIDPrefix, ambiguousEntryErr.Candidates, shortIDMap)
+			}
+
+			if errors.Is(err, store.ErrTaskNotFound) {
+				return &clierr.Error{Code: clierr.NotFound, Message: store.ErrTaskNotFound.Error(), Details: map[string]any{"selector": selector}}
+			}
 			if err != nil {
 				return err
 			}
@@ -67,6 +85,14 @@ func newAttachCmd(a *app) *cobra.Command {
 	attCmd.Flags().BoolVar(&all, "all", false, "allow attaching tasks already marked 'done'")
 
 	return attCmd
+}
+
+func ambiguousEntryError(selector string, candidates []store.Entry, shortIDMap map[string]string) *clierr.Error {
+	var mapped []output.Entry
+	for _, c := range candidates {
+		mapped = append(mapped, mapDBEntryWithShortTask(c, shortIDMap))
+	}
+	return &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique entry using selector", Details: map[string]any{"selector": selector, "candidates": mapped}}
 }
 
 func resolveTaskLookupID(selector string, shortIDMap map[string]string) (order *float64, taskID *string, match bool) {

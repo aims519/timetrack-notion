@@ -18,46 +18,18 @@ func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, taskO
 	defer func() { _ = tx.Rollback() }()
 
 	// Lookup task
-	var foundTaskID string
-	if taskOrder != nil {
-		err := tx.QueryRowContext(ctx, `
-			SELECT page_id
-			FROM tasks
-			WHERE gone_at IS NULL
-			AND tasks.context_id = ?1
-			AND tasks.sort_order = ?2
-			AND (?3 = 1 OR tasks.done = 0)
-		`, DefaultContextID, *taskOrder, all).Scan(&foundTaskID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return Entry{}, &clierr.Error{Code: clierr.NotFound, Message: "no matching tasks found for order number", Details: map[string]any{"selector": taskOrder}}
-		}
-		if err != nil {
-			return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached tasks by order: " + err.Error(), Cause: err, Details: map[string]any{"path": s.dbPath}}
-		}
-	} else if taskID != nil {
-		err := tx.QueryRowContext(ctx, `
-			SELECT page_id
-			FROM tasks
-			WHERE gone_at IS NULL
-			AND tasks.context_id = ?1
-			AND tasks.page_id = ?2
-		`, DefaultContextID, *taskID).Scan(&foundTaskID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return Entry{}, &clierr.Error{Code: clierr.NotFound, Message: "no matching tasks found", Details: map[string]any{"selector": taskID}}
-		}
-		if err != nil {
-			return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached tasks by page_id: " + err.Error(), Cause: err, Details: map[string]any{"path": s.dbPath}}
-		}
+	foundTaskID, err := lookupTask(ctx, tx, taskOrder, taskID, all, s.dbPath)
+	if err != nil {
+		return Entry{}, err
 	}
 
-	if foundTaskID == "" {
-		return Entry{}, &clierr.Error{Code: clierr.NotFound, Message: "no matching task found with given order/page_id", Details: map[string]any{"selector": taskID}}
-	}
-
+	// Lookup entry
 	entryID, err := resolveEntry(ctx, tx, entryPrefix, s.dbPath)
 	if err != nil {
 		return Entry{}, err
 	}
+
+	// Execute task attach in DB
 	err = updateEntryWithTask(ctx, tx, foundTaskID, DefaultContextID, s.dbPath, entryID, nowUTC)
 	if err != nil {
 		return Entry{}, err
@@ -77,6 +49,8 @@ func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, taskO
 	return entry, nil
 }
 
+// resolveEntry attempts to look up an entry first by prefix if provided, then attempts
+// to find the currently running entry, and finally the most recent entry
 func resolveEntry(ctx context.Context, tx *sql.Tx, prefix, dbPath string) (uuid.UUID, error) {
 	if prefix != "" {
 		return entryByIDPrefix(ctx, tx, prefix, dbPath, DefaultContextID)
@@ -93,41 +67,51 @@ func resolveEntry(ctx context.Context, tx *sql.Tx, prefix, dbPath string) (uuid.
 
 func entryByIDPrefix(ctx context.Context, tx *sql.Tx, prefix, dbPath, contextID string) (uuid.UUID, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id
+		SELECT id,
+		description,
+		start_utc,
+		end_utc,
+		task_page_id,
+		tasks.name,
+		entries.entry_page_id,
+		entries.sync_state,
+		entries.updated_at
 		FROM entries
+		LEFT JOIN tasks ON entries.task_page_id = tasks.page_id
+			AND tasks.context_id = entries.context_id
 		WHERE entries.context_id = ?1
 		AND substr(id, 1, length(?2)) = ?2
 		AND entries.deleted_at IS NULL
 		ORDER BY start_utc DESC, id DESC
-		LIMIT 2
 	`, contextID, prefix)
 	if err != nil {
 		return uuid.Nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query entries by ID prefix: " + err.Error(), Cause: err, Details: map[string]any{"path": dbPath}}
 	}
 	defer func() { _ = rows.Close() }()
 
-	var ids []uuid.UUID
+	var candidates []Entry
 	for rows.Next() {
-		var id uuid.UUID
-		err := rows.Scan(&id)
+		e, err := scanEntry(rows)
 		if err != nil {
 			return uuid.Nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query entries by ID prefix: " + err.Error(), Cause: err, Details: map[string]any{"path": dbPath}}
 		}
-		ids = append(ids, id)
+		candidates = append(candidates, e)
 	}
 	if err := rows.Err(); err != nil {
 		return uuid.Nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query entries by ID prefix", Cause: err, Details: map[string]any{"path": dbPath}}
 	}
 
-	switch len(ids) {
+	switch len(candidates) {
 	case 0:
 		return uuid.Nil, &clierr.Error{Code: clierr.NotFound, Message: "unable to find matching entry with ID prefix", Details: map[string]any{"selector": prefix}}
 	case 1:
-		return ids[0], nil
-	case 2:
-		return uuid.Nil, &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique entry with ID prefix", Details: map[string]any{"selector": prefix, "candidates": ids}}
+		entryID, err := uuid.Parse(candidates[0].ID)
+		if err != nil {
+			return uuid.Nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to parse entry ID in lookup", Cause: err, Details: map[string]any{"path": dbPath}}
+		}
+		return entryID, nil
 	default:
-		return uuid.Nil, &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique entry with ID prefix", Details: map[string]any{"selector": prefix, "candidates": ids}}
+		return uuid.Nil, &AmbiguousEntryError{Candidates: candidates}
 	}
 }
 
@@ -152,6 +136,88 @@ func mostRecentEntry(ctx context.Context, tx *sql.Tx, dbPath, contextID string) 
 	return id, true, nil
 }
 
+func lookupTask(ctx context.Context, tx *sql.Tx, taskOrder *float64, taskID *string, all bool, dbPath string) (string, error) {
+	if taskOrder != nil {
+		return taskByOrderNumber(ctx, tx, *taskOrder, all, dbPath)
+	} else if taskID != nil {
+		return taskByID(ctx, tx, *taskID, dbPath)
+	}
+
+	return "", ErrTaskNotFound
+}
+
+// taskByID looks up a task by its ID
+func taskByID(ctx context.Context, tx *sql.Tx, taskID, dbPath string) (string, error) {
+	var foundTaskID string
+	err := tx.QueryRowContext(ctx, `
+			SELECT page_id
+			FROM tasks
+			WHERE gone_at IS NULL
+			AND tasks.context_id = ?1
+			AND tasks.page_id = ?2
+		`, DefaultContextID, taskID).Scan(&foundTaskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrTaskNotFound
+	}
+	if err != nil {
+		return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached tasks by page_id: " + err.Error(), Cause: err, Details: map[string]any{"path": dbPath}}
+	}
+
+	return foundTaskID, nil
+}
+
+// taskByOrderNumber attempts to find a unique task matching the given order number
+func taskByOrderNumber(ctx context.Context, tx *sql.Tx, order float64, all bool, dbPath string) (string, error) {
+	rows, err := tx.QueryContext(ctx, `
+			SELECT 
+			tasks.context_id,
+			tasks.page_id, 
+			tasks.name,
+			tasks.project_page_id,
+			projects.name,
+			tasks.sort_order,
+			tasks.done
+			FROM tasks
+			JOIN contexts ON tasks.context_id = contexts.id
+			LEFT JOIN projects ON tasks.project_page_id = projects.page_id
+				AND projects.gone_at IS NULL
+				AND projects.context_id = contexts.id
+			WHERE tasks.gone_at IS NULL
+			AND tasks.context_id = ?1
+			AND tasks.sort_order = ?2
+			AND (?3 = 1 OR tasks.done = 0)
+			AND (contexts.default_project_page_id IS NULL OR (tasks.project_page_id = contexts.default_project_page_id))
+			ORDER BY tasks.sort_order, tasks.name 
+		`, DefaultContextID, order, all)
+	if err != nil {
+		return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached tasks by order number: " + err.Error(), Cause: err, Details: map[string]any{"path": dbPath}}
+	}
+	defer func() { _ = rows.Close() }()
+
+	var candidates []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached tasks by order number: " + err.Error(), Cause: err, Details: map[string]any{"path": dbPath}}
+		}
+		candidates = append(candidates, t)
+	}
+	if err := rows.Err(); err != nil {
+		return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query cached tasks by order number", Cause: err, Details: map[string]any{"path": dbPath}}
+	}
+
+	switch len(candidates) {
+	case 0:
+		return "", ErrTaskNotFound
+	case 1:
+		return candidates[0].PageID, nil
+	default:
+		return "", &AmbiguousTaskError{Candidates: candidates}
+	}
+}
+
+// updateEntryWithTask updates the target entry row with an attached task, and marks
+// that entry as pending for sync
 func updateEntryWithTask(ctx context.Context, tx *sql.Tx, taskPageID, contextID, dbPath string, entryID uuid.UUID, nowUTC time.Time) error {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE entries

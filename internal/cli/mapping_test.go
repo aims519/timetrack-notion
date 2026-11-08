@@ -458,3 +458,104 @@ func TestMapDbTasks_Project(t *testing.T) {
 		})
 	}
 }
+
+func TestMapDBEntryWithShortTask(t *testing.T) {
+	const (
+		entryID    = "0605115f-a394-4b6d-a8f7-528408bbc44f"
+		taskPageID = "3f63b23e837922"
+	)
+
+	tests := []struct {
+		name       string
+		taskPageID *string
+		taskName   *string
+		shortIDMap map[string]string
+		want       *output.TaskRef
+	}{
+		{
+			name:       "task with a short ID",
+			taskPageID: ptr(taskPageID),
+			taskName:   ptr("Write the sync engine"),
+			shortIDMap: map[string]string{taskPageID: "837922", "4a74c34fa1b2c3": "a1b2c3"},
+			want:       &output.TaskRef{PageID: taskPageID, ShortID: "837922", Name: "Write the sync engine"},
+		},
+		{
+			name:       "task missing from the map",
+			taskPageID: ptr(taskPageID),
+			taskName:   ptr("Write the sync engine"),
+			shortIDMap: map[string]string{"4a74c34fa1b2c3": "a1b2c3"},
+			want:       &output.TaskRef{PageID: taskPageID, Name: "Write the sync engine"},
+		},
+		{
+			name:       "empty map",
+			taskPageID: ptr(taskPageID),
+			taskName:   ptr("Write the sync engine"),
+			shortIDMap: map[string]string{},
+			want:       &output.TaskRef{PageID: taskPageID, Name: "Write the sync engine"},
+		},
+		{
+			name:       "nil map",
+			taskPageID: ptr(taskPageID),
+			taskName:   ptr("Write the sync engine"),
+			shortIDMap: nil,
+			want:       &output.TaskRef{PageID: taskPageID, Name: "Write the sync engine"},
+		},
+		{
+			// The map is keyed by task page ID, so a match on the entry ID is not the task's short ID
+			name:       "map keyed by the entry ID only",
+			taskPageID: ptr(taskPageID),
+			taskName:   ptr("Write the sync engine"),
+			shortIDMap: map[string]string{entryID: "wrong1"},
+			want:       &output.TaskRef{PageID: taskPageID, Name: "Write the sync engine"},
+		},
+		{
+			name:       "no task",
+			shortIDMap: map[string]string{taskPageID: "837922"},
+			want:       nil,
+		},
+		{
+			// The store gives no name when the task isn't cached
+			name:       "task without a name",
+			taskPageID: ptr(taskPageID),
+			shortIDMap: map[string]string{taskPageID: "837922"},
+			want:       nil,
+		},
+		// Edge cases
+		{
+			name:       "untitled task",
+			taskPageID: ptr(taskPageID),
+			taskName:   ptr(""),
+			shortIDMap: map[string]string{taskPageID: "837922"},
+			want:       &output.TaskRef{PageID: taskPageID, ShortID: "837922", Name: ""},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+			end := time.Date(2026, 1, 1, 10, 12, 0, 0, time.UTC)
+			e := store.Entry{
+				ID:         entryID,
+				StartUTC:   start,
+				EndUTC:     &end,
+				TaskPageID: tc.taskPageID,
+				TaskName:   tc.taskName,
+				SyncState:  "pending",
+				UpdatedAt:  end,
+			}
+
+			got := mapDBEntryWithShortTask(e, tc.shortIDMap)
+
+			if !reflect.DeepEqual(got.Task, tc.want) {
+				t.Errorf("Task = %+v, want %+v", got.Task, tc.want)
+			}
+
+			// Everything other than the task is mapped as mapDBEntry maps it
+			want := mapDBEntry(e)
+			got.Task, want.Task = nil, nil
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("mapDBEntryWithShortTask() = %+v, want %+v", got, want)
+			}
+		})
+	}
+}

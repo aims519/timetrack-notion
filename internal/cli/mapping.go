@@ -21,6 +21,21 @@ func mapNullableDBEntry(e *store.Entry) *output.Entry {
 	return &result
 }
 
+// mapDBEntryWithShortTask maps the properties of an Entry returned from
+// the store into an output.Entry, and sets the Task.ShortID if a task is attached and
+// a shortID is found in the given map
+func mapDBEntryWithShortTask(e store.Entry, shortIDMap map[string]string) output.Entry {
+	mapped := mapDBEntry(e)
+
+	if mapped.Task != nil && e.TaskPageID != nil && shortIDMap != nil {
+		if short, found := shortIDMap[*e.TaskPageID]; found {
+			mapped.Task.ShortID = short
+		}
+	}
+
+	return mapped
+}
+
 // mapDBEntry maps the properties of an Entry returned from
 // the store into an output.Entry
 func mapDBEntry(e store.Entry) output.Entry {
@@ -34,6 +49,10 @@ func mapDBEntry(e store.Entry) output.Entry {
 	if e.EndUTC != nil {
 		t := output.NewUTCTime(*e.EndUTC)
 		mapped.End = &t
+	}
+
+	if e.TaskPageID != nil && e.TaskName != nil {
+		mapped.Task = &output.TaskRef{PageID: *e.TaskPageID, Name: *e.TaskName}
 	}
 
 	mapped.Minutes = elapsedMinutes(e.StartUTC, e.EndUTC)

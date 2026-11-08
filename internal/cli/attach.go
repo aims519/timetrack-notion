@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/output"
@@ -12,11 +13,12 @@ import (
 )
 
 func newAttachCmd(a *app) *cobra.Command {
-	var entryID string
+	var entryIDPrefix string
+	var all bool
 	attCmd := &cobra.Command{
 		Use:   "attach [selector]",
 		Short: "Link a Notion task to a time entry. Task is matched based on the selector provided",
-		Long:  "If no --entry ID is provided, defaults to the currently running entry",
+		Long:  "If no --entry ID prefix is provided, defaults to the currently running entry, then the most recent",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return &clierr.Error{Code: clierr.Usage, Message: "invalid command arguments, run 'attach [selector]'"}
@@ -26,8 +28,8 @@ func newAttachCmd(a *app) *cobra.Command {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] cannot be empty"}
 			}
 
-			if cmd.Flag("entry").Changed && entryID == "" {
-				return &clierr.Error{Code: clierr.Usage, Message: "--entry ID cannot be empty"}
+			if cmd.Flag("entry").Changed && len(entryIDPrefix) < 7 {
+				return &clierr.Error{Code: clierr.Usage, Message: "--entry ID cannot be empty and must be at least 7 characters long"}
 			}
 
 			// Database lookup (full ID, short ID, order)
@@ -46,7 +48,8 @@ func newAttachCmd(a *app) *cobra.Command {
 				return &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", selector), Details: map[string]any{"selector": selector}}
 			}
 
-			entry, err := a.db.AttachTaskToEntry(cmd.Context(), order, taskID)
+			nowUTC := time.Now().UTC()
+			entry, err := a.db.AttachTaskToEntry(cmd.Context(), entryIDPrefix, order, taskID, all, nowUTC)
 			if err != nil {
 				return err
 			}
@@ -60,18 +63,13 @@ func newAttachCmd(a *app) *cobra.Command {
 		},
 	}
 
-	attCmd.Flags().StringVar(&entryID, "entry", "", "specify an entry to attach a task to")
+	attCmd.Flags().StringVar(&entryIDPrefix, "entry", "", "specify an entry to attach a task to by ID prefix (min 7 characters)")
+	attCmd.Flags().BoolVar(&all, "all", false, "allow attaching tasks already marked 'done'")
 
 	return attCmd
 }
 
 func resolveTaskLookupID(selector string, shortIDMap map[string]string) (order *float64, taskID *string, match bool) {
-	// Is selector a number?
-	flt, err := strconv.ParseFloat(selector, 64)
-	if err == nil {
-		return &flt, nil, true
-	}
-
 	// Does selector match longID?
 	if _, found := shortIDMap[selector]; found {
 		return nil, &selector, true
@@ -82,6 +80,12 @@ func resolveTaskLookupID(selector string, shortIDMap map[string]string) (order *
 		if selector == short {
 			return nil, &long, true
 		}
+	}
+
+	// Is selector a number?
+	flt, err := strconv.ParseFloat(selector, 64)
+	if err == nil {
+		return &flt, nil, true
 	}
 
 	return nil, nil, false

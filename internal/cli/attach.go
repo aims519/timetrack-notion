@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 )
 
@@ -22,10 +24,28 @@ func newAttachCmd(a *app) *cobra.Command {
 		Short: "Link a Notion task to a time entry. Task is matched based on the selector provided",
 		Long:  "If no --entry ID prefix is provided, defaults to the currently running entry, then the most recent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
+			// present task picker
+			var selector string
+			if len(args) == 0 {
+				allTasks, err := taskListForPicker(cmd.Context(), a.db, all)
+				if err != nil {
+					return err
+				}
+				pickerForm := taskPickerForm(allTasks, &selector)
+
+				err = pickerForm.RunWithContext(cmd.Context())
+				if errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
+					return &clierr.Error{Code: clierr.Cancelled, Message: "task picker cancelled", Cause: err}
+				}
+				if err != nil {
+					return &clierr.Error{Code: clierr.Internal, Message: "error running task picker form", Cause: err}
+				}
+			} else if len(args) == 1 {
+				selector = args[0]
+			} else {
 				return &clierr.Error{Code: clierr.Usage, Message: "invalid command arguments, run 'attach [selector]'"}
 			}
-			selector := args[0]
+
 			if selector == "" {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] cannot be empty"}
 			}
@@ -81,6 +101,7 @@ func newAttachCmd(a *app) *cobra.Command {
 	return attCmd
 }
 
+// ambiguousEntryError maps the store entry objects returned in its error into the output format
 func ambiguousEntryError(selector string, candidates []store.Entry, shortIDMap map[string]string) *clierr.Error {
 	var mapped []output.Entry
 	for _, c := range candidates {
@@ -89,6 +110,8 @@ func ambiguousEntryError(selector string, candidates []store.Entry, shortIDMap m
 	return &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique entry using selector", Details: map[string]any{"selector": selector, "candidates": mapped}}
 }
 
+// resolveTaskLookupID takes the selector argument passed in by the user and works out what kind of selector it is.
+// The checks are made in order: pageID -> shortID -> order
 func resolveTaskLookupID(selector string, shortIDMap map[string]string) (order *float64, taskID *string, match bool) {
 	// Does selector match longID?
 	if _, found := shortIDMap[selector]; found {
@@ -109,4 +132,65 @@ func resolveTaskLookupID(selector string, shortIDMap map[string]string) (order *
 	}
 
 	return nil, nil, false
+}
+
+// taskPickerForm returns a picker form that is triggered if the user
+// doesn't pass in a selector argument to the attach command
+func taskPickerForm(tasks []output.TaskItem, targetTaskID *string) *huh.Form {
+	var taskOptions []huh.Option[string]
+
+	longestOrder := 0
+	longestShortID := 0
+	for _, t := range tasks {
+		if t.Order != nil {
+			if orderLen := len(strconv.FormatFloat(*t.Order, 'f', -1, 64)); orderLen > longestOrder {
+				longestOrder = orderLen
+			}
+		}
+
+		if shortIDLen := len(t.ShortID); shortIDLen > longestShortID {
+			longestShortID = shortIDLen
+		}
+	}
+
+	for _, t := range tasks {
+		var orderStr string
+		if t.Order != nil {
+			orderStr = strconv.FormatFloat(*t.Order, 'f', -1, 64)
+		} else {
+			orderStr = "-"
+		}
+
+		label := fmt.Sprintf("%-*s  %-*s  %s", longestOrder, orderStr, longestShortID, t.ShortID, t.Name)
+		option := huh.NewOption(label, t.PageID)
+		taskOptions = append(taskOptions, option)
+	}
+
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Choose a task to attach").
+				Options(taskOptions...).
+				Value(targetTaskID),
+		),
+	)
+}
+
+// taskListForPicker retrieves the list of available tasks to be passed to the picker form
+func taskListForPicker(ctx context.Context, s *store.Store, all bool) ([]output.TaskItem, error) {
+	// Fetch all tasks
+	tasks, _, err := s.ListTasks(ctx, store.NoLimit, all, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch short ID mappings for all tasks
+	shortIDMap, err := buildShortIDMap(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+
+	doc := mapDbTasks(tasks, shortIDMap, false, nil)
+
+	return doc.Tasks, nil
 }

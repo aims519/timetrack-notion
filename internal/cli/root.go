@@ -42,7 +42,7 @@ func newRootCmd(a *app) *cobra.Command {
 	}
 
 	rootCmd.PersistentFlags().Var(a.format, "output", "output format: table or json")
-	rootCmd.PersistentFlags().BoolVar(&a.noInput, "no-input", false, "user input disabled")
+	rootCmd.PersistentFlags().BoolVar(&a.noInput, "no-input", false, "never prompt")
 
 	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return &clierr.Error{Code: clierr.Usage, Message: err.Error(), Cause: err}

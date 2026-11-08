@@ -12,6 +12,7 @@ import (
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 )
@@ -24,7 +25,7 @@ func newAttachCmd(a *app) *cobra.Command {
 		Short: "Link a Notion task to a time entry. Task is matched based on the selector provided",
 		Long:  "If no --entry ID prefix is provided, defaults to the currently running entry, then the most recent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 && !a.canPrompt(cmd.InOrStdin(), cmd.ErrOrStderr()) {
+			if len(args) == 0 && !a.canPrompt(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()) {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] argument is required when prompts are disabled (no terminal or --no-input)"}
 			}
 
@@ -181,14 +182,17 @@ func taskPickerForm(tasks []output.TaskItem, targetTaskID *string) *huh.Form {
 		taskOptions = append(taskOptions, option)
 	}
 
+	keyMap := huh.NewDefaultKeyMap()
+	keyMap.Quit = key.NewBinding(key.WithKeys("esc", "ctrl+c"))
+
 	return huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Choose a task to attach").
+				Title("Choose a task to attach. Esc to cancel").
 				Options(taskOptions...).
 				Value(targetTaskID),
 		),
-	)
+	).WithKeyMap(keyMap)
 }
 
 // taskListForPicker retrieves the list of available tasks to be passed to the picker form

@@ -67,13 +67,12 @@ type app struct {
 	noInput          bool
 }
 
-func (a *app) canPrompt(in io.Reader, out io.Writer) bool {
+func (a *app) canPrompt(in io.Reader, out, err io.Writer) bool {
 	type descriptor interface {
 		Fd() uintptr
 	}
 
-	outTerminal := false
-	inTerminal := false
+	var inTerminal, outTerminal, errTerminal bool
 
 	if outD, ok := out.(descriptor); ok {
 		outTerminal = term.IsTerminal(outD.Fd())
@@ -83,7 +82,11 @@ func (a *app) canPrompt(in io.Reader, out io.Writer) bool {
 		inTerminal = term.IsTerminal(inD.Fd())
 	}
 
-	return !a.noInput && inTerminal && outTerminal
+	if errOut, ok := err.(descriptor); ok {
+		errTerminal = term.IsTerminal(errOut.Fd())
+	}
+
+	return !a.noInput && inTerminal && outTerminal && errTerminal
 }
 
 func run(ctx context.Context, a *app, args []string, stdout, stderr io.Writer) int {

@@ -471,9 +471,9 @@ func TestRun_AttachedEntry_TaskHasShortID(t *testing.T) {
 	}
 }
 
-// With no selector, attach opens the picker only if prompts are allowed. In tests stderr is a
-// buffer, never a terminal, so both cases fail as usage errors and leave the entry unattached
-// (§3, §8)
+// With no selector, attach opens the picker only if prompts are allowed. In tests stdout and
+// stderr are buffers, never terminals, so both cases fail as usage errors and leave the entry
+// unattached (§3, §8)
 func TestRun_Attach_NoSelectorWithoutPrompts_IsUsageError(t *testing.T) {
 	tests := []struct {
 		name string

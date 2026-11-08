@@ -13,6 +13,7 @@ import (
 	"github.com/aims519/timetrack-notion/internal/notion"
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
@@ -41,6 +42,7 @@ func newRootCmd(a *app) *cobra.Command {
 	}
 
 	rootCmd.PersistentFlags().Var(a.format, "output", "output format: table or json")
+	rootCmd.PersistentFlags().BoolVar(&a.noInput, "no-input", false, "user input disabled")
 
 	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return &clierr.Error{Code: clierr.Usage, Message: err.Error(), Cause: err}
@@ -62,6 +64,26 @@ type app struct {
 	format           *output.Format
 	notionBaseURL    string
 	notionHTTPClient *http.Client
+	noInput          bool
+}
+
+func (a *app) canPrompt(in io.Reader, out io.Writer) bool {
+	type descriptor interface {
+		Fd() uintptr
+	}
+
+	outTerminal := false
+	inTerminal := false
+
+	if outD, ok := out.(descriptor); ok {
+		outTerminal = term.IsTerminal(outD.Fd())
+	}
+
+	if inD, ok := in.(descriptor); ok {
+		inTerminal = term.IsTerminal(inD.Fd())
+	}
+
+	return !a.noInput && inTerminal && outTerminal
 }
 
 func run(ctx context.Context, a *app, args []string, stdout, stderr io.Writer) int {

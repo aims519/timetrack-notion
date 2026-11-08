@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// AttachTaskToEntry attempts to attach a task to an entry, using selectors provided by the user
 func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, taskOrder *float64, taskID *string, all bool, nowUTC time.Time) (Entry, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
@@ -65,6 +66,7 @@ func resolveEntry(ctx context.Context, tx *sql.Tx, prefix, dbPath string) (uuid.
 	return uuid.Nil, &clierr.Error{Code: clierr.NotFound, Message: "unable to find matching entry for task attachment"}
 }
 
+// entryByIDPrefix attempts to look up an entry using an ID prefix
 func entryByIDPrefix(ctx context.Context, tx *sql.Tx, prefix, dbPath, contextID string) (uuid.UUID, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id,
@@ -115,6 +117,8 @@ func entryByIDPrefix(ctx context.Context, tx *sql.Tx, prefix, dbPath, contextID 
 	}
 }
 
+// mostRecentEntry attempts to look up the most recently started entry in the event a running
+// entry was not found
 func mostRecentEntry(ctx context.Context, tx *sql.Tx, dbPath, contextID string) (uuid.UUID, bool, error) {
 	var id uuid.UUID
 	err := tx.QueryRowContext(ctx, `
@@ -136,6 +140,8 @@ func mostRecentEntry(ctx context.Context, tx *sql.Tx, dbPath, contextID string) 
 	return id, true, nil
 }
 
+// lookupTask attempts to look up a task by its order number if that's the selector the user provided.
+// Otherwise, by ID
 func lookupTask(ctx context.Context, tx *sql.Tx, taskOrder *float64, taskID *string, all bool, dbPath string) (string, error) {
 	if taskOrder != nil {
 		return taskByOrderNumber(ctx, tx, *taskOrder, all, dbPath)

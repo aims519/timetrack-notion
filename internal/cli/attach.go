@@ -66,7 +66,7 @@ func newAttachCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			doc := output.NewEntryDoc(mapDBEntry(entry, shortIDMap), nil)
+			doc := output.NewAttachDoc(mapDBEntry(entry, shortIDMap), nil)
 			loc, err := timeparse.CurrentLocation()
 			if err != nil {
 				return err

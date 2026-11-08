@@ -95,7 +95,7 @@ In a local-only context there is no task cache: selectors and `--pick` fail with
 | Command | Behaviour |
 |---|---|
 | `tt list [--week \| --since/--until DATE] [--task S] [--project P] [--unattached] [--unsynced] [--limit N] [--wide]` | Today's entries by default, chronological. An entry belongs to the day it started. `--wide` stops truncation. |
-| `tt attach [selector] [--entry ID]` | Links a task to the running entry, else the most recent one, or `--entry`. With no selector it opens the picker (so a selector is required without a terminal). Needs a connected context. |
+| `tt attach [selector] [--entry ID] [--all]` | Links a task to the running entry, else the most recent one, or `--entry`. With no selector it opens the picker (so a selector is required without a terminal). `--all` adds done tasks to order numbers and the picker (§5). Needs a connected context. |
 | `tt edit <entry> [--description] [--start] [--end] [--task S \| --pick]` | Any change makes the entry `pending`, including a `blocked` one; a synced entry's Notion row is updated next sync. `--end` can't be set on a running entry (use `stop --at`). No detaching a task in v1. |
 | `tt delete <entry> [--yes] [--dry-run]` | Removed outright only if no Notion create was ever attempted (`create_attempted_at` null); otherwise tombstoned, and the next sync trashes the row. `--dry-run` says which, changing nothing. Deleting the running entry frees the timer. |
 | `tt add [description] [-t S \| --pick] <span>` | Logs a finished entry without touching the timer. Span: `--start`+`--end`, `--start`+`--duration`, `--end`+`--duration`, or `--duration` or `--start` alone (ending now). Needs a description, a task, or both. |

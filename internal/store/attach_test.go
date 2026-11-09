@@ -198,7 +198,7 @@ func TestAttachTaskToEntry_ResolvesEntry(t *testing.T) {
 			insertAttachEntries(t, st, tc.entries)
 			before := readStoredEntries(t, st)
 
-			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open"), All: false}, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, "task_open", attachNow)
 			if err != nil {
 				t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
 			}
@@ -262,7 +262,7 @@ func TestAttachTaskToEntry_EntryErrors(t *testing.T) {
 			insertAttachEntries(t, st, tc.entries)
 			before := readStoredEntries(t, st)
 
-			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open"), All: false}, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, "task_open", attachNow)
 
 			details := checkAttachError(t, err, tc.wantCode)
 			if got.ID != "" {
@@ -344,7 +344,7 @@ func TestAttachTaskToEntry_AmbiguousEntryPrefix(t *testing.T) {
 			insertAttachEntries(t, st, tc.entries)
 			before := readStoredEntries(t, st)
 
-			_, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open")}, attachNow)
+			_, err := st.AttachTaskToEntry(t.Context(), tc.prefix, "task_open", attachNow)
 
 			// The store returns the matching entries; the CLI turns them into entry documents
 			var ambErr *AmbiguousEntryError
@@ -374,64 +374,6 @@ func TestAttachTaskToEntry_AmbiguousEntryPrefix(t *testing.T) {
 
 			if after := readStoredEntries(t, st); !maps.Equal(after, before) {
 				t.Errorf("entries want unchanged %+v, got %+v", before, after)
-			}
-		})
-	}
-}
-
-func TestAttachTaskToEntry_ResolvesTask(t *testing.T) {
-	tasks := []listTask{
-		{pageID: "task_open", name: "Open task", order: ptr(1.0)},
-		{pageID: "task_done", name: "Done task", order: ptr(2.0), done: true},
-		{pageID: "task_gone", name: "Gone task", order: ptr(3.0), gone: true},
-	}
-
-	tests := []struct {
-		name       string
-		order      *float64
-		taskID     *string
-		all        bool
-		wantTaskID string // empty when no task should be found
-	}{
-		{name: "id_open", taskID: ptr("task_open"), wantTaskID: "task_open"},
-		{name: "order_open", order: ptr(1.0), wantTaskID: "task_open"},
-		// IDs match the whole cache, done tasks included; --all only widens order numbers (§5)
-		{name: "id_done", taskID: ptr("task_done"), wantTaskID: "task_done"},
-		{name: "id_done_all", taskID: ptr("task_done"), all: true, wantTaskID: "task_done"},
-		{name: "order_done", order: ptr(2.0)},
-		{name: "order_done_all", order: ptr(2.0), all: true, wantTaskID: "task_done"},
-		// Gone tasks never match
-		{name: "id_gone", taskID: ptr("task_gone")},
-		{name: "order_gone", order: ptr(3.0), all: true},
-		{name: "id_unknown", taskID: ptr("task_unknown")},
-		{name: "order_unknown", order: ptr(9.0)},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
-			insertListTasks(t, st, tasks)
-			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
-			before := readStoredEntries(t, st)
-
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: tc.order, PageID: tc.taskID, All: tc.all}, attachNow)
-
-			if tc.wantTaskID == "" {
-				checkTaskNotFound(t, err)
-				if after := readStoredEntries(t, st); !maps.Equal(after, before) {
-					t.Errorf("entries want unchanged %+v, got %+v", before, after)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
-			}
-			if got.TaskPageID == nil || *got.TaskPageID != tc.wantTaskID {
-				t.Errorf("TaskPageID want %q, got %v", tc.wantTaskID, got.TaskPageID)
-			}
-			if stored := readStoredEntries(t, st)[entryB].taskPageID; stored.String != tc.wantTaskID {
-				t.Errorf("stored task_page_id want %q, got %+v", tc.wantTaskID, stored)
 			}
 		})
 	}
@@ -474,7 +416,7 @@ func TestAttachTaskToEntry_UpdatesEntry(t *testing.T) {
 				syncState:   tc.syncState,
 			}})
 
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{PageID: ptr("task_new")}, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), "", "task_new", attachNow)
 			if err != nil {
 				t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
 			}
@@ -516,7 +458,7 @@ func TestAttachTaskToEntry_UpdatesEntry(t *testing.T) {
 	}
 }
 
-func TestAttachTaskToEntry_OrderNumbers(t *testing.T) {
+func TestResolveTask_OrderNumbers(t *testing.T) {
 	// Order numbers cover only the current project's open tasks, and match the whole cache
 	// when there is no default project, as in task list (§5)
 	tasks := []listTask{
@@ -563,12 +505,13 @@ func TestAttachTaskToEntry_OrderNumbers(t *testing.T) {
 			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 			insertListTasks(t, st, tasks)
 			setDefaultProject(t, st, tc.defaultProject)
-			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
-			before := readStoredEntries(t, st)
 
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: tc.order, PageID: tc.taskID, All: tc.all}, attachNow)
+			got, err := st.ResolveTask(t.Context(), TaskSelector{Order: tc.order, PageID: tc.taskID, All: tc.all})
 
 			if tc.wantTaskID == "" {
+				if got != nil {
+					t.Errorf("task page ID want nil on error, got %q", *got)
+				}
 				if tc.wantCandidates != nil {
 					// The store returns the matching tasks; the CLI turns them into task items (§8)
 					var ambErr *AmbiguousTaskError
@@ -583,22 +526,13 @@ func TestAttachTaskToEntry_OrderNumbers(t *testing.T) {
 				} else {
 					checkTaskNotFound(t, err)
 				}
-
-				if after := readStoredEntries(t, st); !maps.Equal(after, before) {
-					t.Errorf("entries want unchanged %+v, got %+v", before, after)
-				}
 				return
 			}
 
 			if err != nil {
-				t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
+				t.Fatalf("ResolveTask() want nil error, got %v", err)
 			}
-			if got.TaskPageID == nil || *got.TaskPageID != tc.wantTaskID {
-				t.Errorf("TaskPageID want %q, got %v", tc.wantTaskID, got.TaskPageID)
-			}
-			if stored := readStoredEntries(t, st)[entryB].taskPageID; stored.String != tc.wantTaskID {
-				t.Errorf("stored task_page_id want %q, got %+v", tc.wantTaskID, stored)
-			}
+			checkStringPtr(t, "task page ID", got, &tc.wantTaskID)
 		})
 	}
 }
@@ -606,7 +540,7 @@ func TestAttachTaskToEntry_OrderNumbers(t *testing.T) {
 // The candidates' projects come from the task's own context and leave out gone projects, as in
 // task list. A project cached under another context must not duplicate a task, which would
 // also make a unique order number look ambiguous
-func TestAttachTaskToEntry_OrderNumbers_CandidateProjects(t *testing.T) {
+func TestResolveTask_CandidateProjects(t *testing.T) {
 	tasks := []listTask{
 		{pageID: "p1_a", name: "P1 a", project: ptr("project1"), order: ptr(1.0)},
 		{pageID: "p1_b", name: "P1 b", project: ptr("project1"), order: ptr(1.0)},
@@ -658,17 +592,14 @@ func TestAttachTaskToEntry_OrderNumbers_CandidateProjects(t *testing.T) {
 			insertOtherContext(t, st)
 			insertListProjects(t, st, projects)
 			insertListTasks(t, st, tasks)
-			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
 
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: ptr(tc.order)}, attachNow)
+			got, err := st.ResolveTask(t.Context(), TaskSelector{Order: ptr(tc.order)})
 
 			if tc.wantTaskID != "" {
 				if err != nil {
-					t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
+					t.Fatalf("ResolveTask() want nil error, got %v", err)
 				}
-				if got.TaskPageID == nil || *got.TaskPageID != tc.wantTaskID {
-					t.Errorf("TaskPageID want %q, got %v", tc.wantTaskID, got.TaskPageID)
-				}
+				checkStringPtr(t, "task page ID", got, &tc.wantTaskID)
 				return
 			}
 
@@ -704,6 +635,107 @@ func TestAttachTaskToEntry_OrderNumbers_CandidateProjects(t *testing.T) {
 					t.Errorf("candidate %d = %s in %q, want %s in %q", i, g.pageID, g.projectID, want.pageID, want.projectID)
 				}
 				checkStringPtr(t, want.pageID+" project name", g.projectName, want.projectName)
+			}
+		})
+	}
+}
+
+// resolveTasks are the cached tasks the ResolveTask tests resolve against
+var resolveTasks = []listTask{
+	{pageID: "task_open", name: "Open task", order: ptr(1.0)},
+	{pageID: "task_done", name: "Done task", order: ptr(2.0), done: true},
+	{pageID: "task_gone", name: "Gone task", order: ptr(3.0), gone: true},
+	{pageID: "task_dup_a", name: "Dup A", order: ptr(4.0)},
+	{pageID: "task_dup_b", name: "Dup B", order: ptr(4.0)},
+	{pageID: "task_five", name: "Five", order: ptr(5.0)},
+	{pageID: "task_five_done", name: "Five done", order: ptr(5.0), done: true},
+}
+
+func TestResolveTask(t *testing.T) {
+	tests := []struct {
+		name           string
+		selector       TaskSelector
+		wantTaskID     string   // empty when the lookup should fail
+		wantCandidates []string // sorted page IDs when the order is ambiguous; nil when not found
+	}{
+		{name: "id_open", selector: TaskSelector{PageID: ptr("task_open")}, wantTaskID: "task_open"},
+		{name: "order_open", selector: TaskSelector{Order: ptr(1.0)}, wantTaskID: "task_open"},
+		// IDs match the whole cache, done tasks included (§3.1)
+		{name: "id_done", selector: TaskSelector{PageID: ptr("task_done")}, wantTaskID: "task_done"},
+		// Order numbers cover only open tasks, unless All adds the done ones
+		{name: "order_done", selector: TaskSelector{Order: ptr(2.0)}},
+		{name: "order_done_all", selector: TaskSelector{Order: ptr(2.0), All: true}, wantTaskID: "task_done"},
+		{name: "order_open_all", selector: TaskSelector{Order: ptr(1.0), All: true}, wantTaskID: "task_open"},
+		{name: "id_done_all", selector: TaskSelector{PageID: ptr("task_done"), All: true}, wantTaskID: "task_done"},
+		// Gone tasks never match, even with All
+		{name: "id_gone", selector: TaskSelector{PageID: ptr("task_gone")}},
+		{name: "order_gone", selector: TaskSelector{Order: ptr(3.0)}},
+		{name: "order_gone_all", selector: TaskSelector{Order: ptr(3.0), All: true}},
+		{name: "id_unknown", selector: TaskSelector{PageID: ptr("task_unknown")}},
+		{name: "order_unknown", selector: TaskSelector{Order: ptr(9.0)}},
+		{name: "order_ambiguous", selector: TaskSelector{Order: ptr(4.0)}, wantCandidates: []string{"task_dup_a", "task_dup_b"}},
+		// A done task sharing an open task's order only makes it ambiguous with All
+		{name: "order_shared_with_done", selector: TaskSelector{Order: ptr(5.0)}, wantTaskID: "task_five"},
+		{name: "order_shared_with_done_all", selector: TaskSelector{Order: ptr(5.0), All: true}, wantCandidates: []string{"task_five", "task_five_done"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListTasks(t, st, resolveTasks)
+
+			got, err := st.ResolveTask(t.Context(), tc.selector)
+
+			if tc.wantTaskID != "" {
+				if err != nil {
+					t.Fatalf("ResolveTask() want nil error, got %v", err)
+				}
+				checkStringPtr(t, "task page ID", got, &tc.wantTaskID)
+				return
+			}
+
+			if got != nil {
+				t.Errorf("task page ID want nil on error, got %q", *got)
+			}
+			if tc.wantCandidates == nil {
+				checkTaskNotFound(t, err)
+				return
+			}
+			var ambErr *AmbiguousTaskError
+			if !errors.As(err, &ambErr) {
+				t.Fatalf("want *AmbiguousTaskError, got %T: %v", err, err)
+			}
+			gotIDs := listedPageIDs(ambErr.Candidates)
+			slices.Sort(gotIDs)
+			if !slices.Equal(gotIDs, tc.wantCandidates) {
+				t.Errorf("Candidates = %q, want %q", gotIDs, tc.wantCandidates)
+			}
+		})
+	}
+}
+
+// An empty selector, as from a start with only a description, resolves to no task rather than
+// failing, whatever All is
+func TestResolveTask_NoSelector(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector TaskSelector
+	}{
+		{name: "empty", selector: TaskSelector{}},
+		{name: "all_only", selector: TaskSelector{All: true}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListTasks(t, st, resolveTasks)
+
+			got, err := st.ResolveTask(t.Context(), tc.selector)
+			if err != nil {
+				t.Fatalf("ResolveTask() want nil error, got %v", err)
+			}
+			if got != nil {
+				t.Errorf("task page ID want nil, got %q", *got)
 			}
 		})
 	}

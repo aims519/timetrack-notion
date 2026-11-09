@@ -114,19 +114,32 @@ func rejectUnimplemented(sa startArgs) error {
 	return nil
 }
 
-func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string) (output.StartDoc, error) {
-	task := store.TaskSelector{All: s.allTasks}
-	if s.taskSelector != "" {
-		order, pageID, found := resolveTaskLookupID(s.taskSelector, shortIDMap)
+func buildTaskSelector(selector string, all bool, shortIDMap map[string]string) (store.TaskSelector, error) {
+	task := store.TaskSelector{All: all}
+	if selector != "" {
+		order, pageID, found := resolveTaskLookupID(selector, shortIDMap)
 		if !found {
-			return output.StartDoc{}, &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", s.taskSelector), Details: map[string]any{"selector": s.taskSelector}}
+			return store.TaskSelector{}, &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", selector), Details: map[string]any{"selector": selector}}
 		}
 		task.Order = order
 		task.PageID = pageID
 	}
 
+	return task, nil
+}
+
+func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string) (output.StartDoc, error) {
+	selector, err := buildTaskSelector(s.taskSelector, s.allTasks, shortIDMap)
+	if err != nil {
+		return output.StartDoc{}, err
+	}
+	taskPageID, err := a.db.ResolveTask(ctx, selector)
+	if err != nil {
+		return output.StartDoc{}, handleTaskErrors(err, shortIDMap, s.taskSelector, "")
+	}
+
 	if s.switchTask {
-		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, task, s.description)
+		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, taskPageID, s.description)
 		if err != nil {
 			return output.StartDoc{}, handleTaskErrors(err, shortIDMap, s.taskSelector, "")
 		}
@@ -135,7 +148,7 @@ func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time
 			mapNullableDBEntry(stoppedEntry, shortIDMap), nil), nil
 	}
 
-	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, task, s.description)
+	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, taskPageID, s.description)
 	if err != nil {
 		return output.StartDoc{}, handleTaskErrors(err, shortIDMap, s.taskSelector, "")
 	}

@@ -76,14 +76,17 @@ func newAttachCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			order, taskID, found := resolveTaskLookupID(selector, shortIDMap)
-			if !found {
-				return &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", selector), Details: map[string]any{"selector": selector}}
+			taskSelector, err := buildTaskSelector(selector, all, shortIDMap)
+			if err != nil {
+				return err
+			}
+			taskPageID, err := a.db.ResolveTask(cmd.Context(), taskSelector)
+			if err != nil {
+				return handleTaskErrors(err, shortIDMap, selector, entryIDPrefix)
 			}
 
 			nowUTC := time.Now().UTC()
-			task := store.TaskSelector{Order: order, PageID: taskID, All: all}
-			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), task, nowUTC)
+			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), *taskPageID, nowUTC)
 
 			if err != nil {
 				return handleTaskErrors(err, shortIDMap, selector, entryIDPrefix)

@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -61,27 +63,9 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			var taskPageID *string
-			if sa.pickTask {
-				allTasks, err := loadAllTasks(cmd.Context(), a.db, sa.allTasks, shortIDMap, "start")
-				if err != nil {
-					return err
-				}
-
-				selectedPageID, err := runPickerForm(cmd.Context(), allTasks, cmd.InOrStdin(), cmd.ErrOrStderr())
-				if err != nil {
-					return err
-				}
-				taskPageID = &selectedPageID
-			} else {
-				selector, err := buildTaskSelector(sa.taskSelector, sa.allTasks, shortIDMap)
-				if err != nil {
-					return err
-				}
-				taskPageID, err = a.db.ResolveTask(cmd.Context(), selector)
-				if err != nil {
-					return handleTaskErrors(err, shortIDMap, sa.taskSelector, "")
-				}
+			taskPageID, err := resolveStartTaskPageID(cmd.Context(), a.db, sa, shortIDMap, cmd.InOrStdin(), cmd.ErrOrStderr(), canPrompt)
+			if err != nil {
+				return handleTaskErrors(err, shortIDMap, sa.taskSelector, "")
 			}
 
 			startDoc, err := executeStartUpdates(cmd.Context(), a, sa, startUTC, shortIDMap, taskPageID)
@@ -169,4 +153,42 @@ func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time
 
 	return output.NewStartDoc(mapDBEntry(dbEntry, shortIDMap),
 		nil, nil), nil
+}
+
+// resolveStartTaskPageID either presents the user with a picker form, or tries to match the given task selector to
+// a task pageID
+func resolveStartTaskPageID(ctx context.Context, s *store.Store, args startArgs, shortIDMap map[string]string, stdIn io.Reader, stdErr io.Writer, canPrompt bool) (*string, error) {
+	if args.pickTask {
+		allTasks, err := loadAllTasks(ctx, s, args.allTasks, shortIDMap, "start")
+		if err != nil {
+			return nil, err
+		}
+
+		selectedPageID, err := runPickerForm(ctx, allTasks, stdIn, stdErr)
+		return &selectedPageID, err
+	}
+
+	selector, err := buildTaskSelector(args.taskSelector, args.allTasks, shortIDMap)
+	if err != nil {
+		return nil, err
+	}
+
+	// if the task fails to resolve with an ambiguous task error, present the user
+	// with a picker to choose between candidates. Only if prompting is allowed
+	taskPageID, err := s.ResolveTask(ctx, selector)
+	var ambigErr *store.AmbiguousTaskError
+	if canPrompt && errors.As(err, &ambigErr) {
+		pickedCandidate, err := runPickerForm(ctx,
+			mapDbTasks(ambigErr.Candidates, shortIDMap, false, nil).Tasks,
+			stdIn,
+			stdErr)
+		if err != nil {
+			return nil, err
+		}
+		taskPageID = &pickedCandidate
+	} else if err != nil {
+		return nil, err
+	}
+
+	return taskPageID, nil
 }

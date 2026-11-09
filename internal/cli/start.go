@@ -47,6 +47,15 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			// Check if Notion context is connected
+			connected, err := a.db.ContextConnected(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if !connected && (sa.pickTask || sa.taskSelector != "") {
+				return &clierr.Error{Code: clierr.NotInitialised, Message: "notion context not connected, run 'tt init'"}
+			}
+
 			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)
 			if err != nil {
 				return err

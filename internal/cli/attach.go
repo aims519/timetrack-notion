@@ -25,6 +25,15 @@ func newAttachCmd(a *app) *cobra.Command {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] argument is required when prompts are disabled (no terminal or --no-input)"}
 			}
 
+			// Check if Notion context is connected
+			connected, err := a.db.ContextConnected(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if !connected {
+				return &clierr.Error{Code: clierr.NotInitialised, Message: "notion context not connected, run 'tt init'"}
+			}
+
 			// Database lookup (full ID, short ID, order)
 			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)
 			if err != nil {

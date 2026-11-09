@@ -73,8 +73,19 @@ func (s *Store) ReadStatus(ctx context.Context, todayStartUTC, todayEndUTC time.
 
 // contextConnected checks if the default context has the Notion tasks_db_id set, and returns true if so
 func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, error) {
-	var tasksDataSourceID *string
-	err := tx.QueryRowContext(ctx, "SELECT tasks_data_source_id from contexts WHERE id = ?", DefaultContextID).Scan(&tasksDataSourceID)
+	var (
+		tasksDataSourceID    *string
+		projectsDataSourceID *string
+		entriesDataSourceID  *string
+		propertyMap          *string
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT tasks_data_source_id,
+		projects_data_source_id,
+		entries_data_source_id,
+		property_map
+	 	FROM contexts WHERE id = ?
+	 `, DefaultContextID).Scan(&tasksDataSourceID, &projectsDataSourceID, &entriesDataSourceID, &propertyMap)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "no context found", Details: map[string]any{"path": dbPath}}
 	}
@@ -82,7 +93,21 @@ func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, err
 		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query database context", Cause: err, Details: map[string]any{"path": dbPath}}
 	}
 
-	return tasksDataSourceID != nil, nil
+	result := tasksDataSourceID != nil &&
+		projectsDataSourceID != nil &&
+		entriesDataSourceID != nil &&
+		propertyMap != nil
+	return result, nil
+}
+
+func (s *Store) ContextConnected(ctx context.Context) (bool, error) {
+	tx, err := s.connectionPool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	return contextConnected(ctx, tx, s.dbPath)
 }
 
 // entriesStartedToday returns all entries that were started during the provided start and end times

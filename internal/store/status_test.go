@@ -151,22 +151,41 @@ func TestReadStatus_TodayEntries(t *testing.T) {
 	}
 }
 
-func TestReadStatus_Connected(t *testing.T) {
-	tests := []struct {
-		name      string
-		tasksDBID any
-		want      bool
-	}{
-		{name: "local_only", tasksDBID: nil, want: false},
-		{name: "connected", tasksDBID: "3f63b23e-0000-0000-0000-000000000000", want: true},
+// connectedCases are contexts as tt init leaves them, or with one of the values it saves missing.
+// A context is connected only when init has saved every one of them (§4, §5)
+func connectedCases() []struct {
+	name string
+	nc   NotionContext
+	want bool
+} {
+	without := func(change func(nc *NotionContext)) NotionContext {
+		nc := connectedContext()
+		change(&nc)
+		return nc
 	}
 
-	for _, tc := range tests {
+	return []struct {
+		name string
+		nc   NotionContext
+		want bool
+	}{
+		{name: "local_only", nc: NotionContext{ID: testContextID}, want: false},
+		{name: "connected", nc: connectedContext(), want: true},
+		// The default project is optional
+		{name: "no_default_project", nc: without(func(nc *NotionContext) { nc.DefaultProjectPageID = nil }), want: true},
+		{name: "no_tasks_data_source", nc: without(func(nc *NotionContext) { nc.TasksDataSourceID = nil }), want: false},
+		{name: "no_projects_data_source", nc: without(func(nc *NotionContext) { nc.ProjectsDataSourceID = nil }), want: false},
+		{name: "no_entries_data_source", nc: without(func(nc *NotionContext) { nc.EntriesDataSourceID = nil }), want: false},
+		{name: "no_property_map", nc: without(func(nc *NotionContext) { nc.PropertyMap = nil }), want: false},
+	}
+}
+
+func TestReadStatus_Connected(t *testing.T) {
+	for _, tc := range connectedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
-			_, err := st.connectionPool.ExecContext(t.Context(), "UPDATE contexts SET tasks_data_source_id = ? WHERE id = ?", tc.tasksDBID, testContextID)
-			if err != nil {
-				t.Fatalf("update context failed: %v", err)
+			if err := st.SaveNotionContext(t.Context(), tc.nc); err != nil {
+				t.Fatalf("SaveNotionContext(): %v", err)
 			}
 
 			got, err := st.ReadStatus(t.Context(), testDayStart, testDayEnd)
@@ -300,5 +319,52 @@ func TestWaitingEntriesCount(t *testing.T) {
 				t.Errorf("WaitingEntriesCount() want %d, got %d", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestContextConnected(t *testing.T) {
+	for _, tc := range connectedCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			if err := st.SaveNotionContext(t.Context(), tc.nc); err != nil {
+				t.Fatalf("SaveNotionContext(): %v", err)
+			}
+
+			got, err := st.ContextConnected(t.Context())
+			if err != nil {
+				t.Fatalf("ContextConnected() want nil error, got %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("ContextConnected() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContextConnected_MissingContext(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st := openTestStore(t, dbPath)
+
+	// See TestStartNewTimer_MissingContext: only something outside tt can remove the context
+	_, err := st.connectionPool.ExecContext(t.Context(),
+		`
+		DELETE FROM cache_state WHERE context_id = ?;
+		DELETE FROM contexts WHERE id = ?;
+	`, testContextID, testContextID)
+	if err != nil {
+		t.Fatalf("delete context failed: %v", err)
+	}
+
+	_, err = st.ContextConnected(t.Context())
+
+	var errcli *clierr.Error
+	if !errors.As(err, &errcli) {
+		t.Fatalf("want *clierr.Error, got %T: %v", err, err)
+	}
+	if errcli.Code != clierr.DatabaseUnusable {
+		t.Errorf("Code want %q, got %q", clierr.DatabaseUnusable, errcli.Code)
+	}
+	if got := errcli.Details["path"]; got != dbPath {
+		t.Errorf("Details[\"path\"] want %q, got %v", dbPath, got)
 	}
 }

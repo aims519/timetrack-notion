@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, description string) (Entry, error) {
+func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, task TaskSelector, description *string) (Entry, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
 		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
@@ -24,8 +24,17 @@ func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, descripti
 		return Entry{}, &clierr.Error{Code: clierr.TimerRunning, Message: "timer already running", Details: map[string]any{"entry": runningEntryID.String()}}
 	}
 
+	var taskPageID *string
+	if task.hasValue() {
+		pageID, err := lookupTask(ctx, tx, task, s.dbPath)
+		if err != nil {
+			return Entry{}, err
+		}
+		taskPageID = &pageID
+	}
+
 	// create new entry
-	newID, err := insertNewEntry(ctx, tx, time.Now().UTC(), startUTC, description, s.dbPath)
+	newID, err := insertNewEntry(ctx, tx, time.Now().UTC(), startUTC, taskPageID, description, s.dbPath)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -44,7 +53,7 @@ func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, descripti
 	return entry, nil
 }
 
-func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, description string) (started Entry, stopped *Entry, err error) {
+func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, task TaskSelector, description *string) (started Entry, stopped *Entry, err error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
 		return Entry{}, nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
@@ -58,8 +67,18 @@ func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, description
 		return Entry{}, nil, err
 	}
 
+	// If the user passed a task selector, resolve to a pageID here
+	var taskPageID *string
+	if task.hasValue() {
+		pageID, err := lookupTask(ctx, tx, task, s.dbPath)
+		if err != nil {
+			return Entry{}, nil, err
+		}
+		taskPageID = &pageID
+	}
+
 	// Create new entry
-	createdID, err := insertNewEntry(ctx, tx, now, startUTC, description, s.dbPath)
+	createdID, err := insertNewEntry(ctx, tx, now, startUTC, taskPageID, description, s.dbPath)
 	if err != nil {
 		return Entry{}, nil, err
 	}
@@ -87,21 +106,22 @@ func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, description
 	return startedEntry, stoppedEntryResult, nil
 }
 
-func insertNewEntry(ctx context.Context, tx *sql.Tx, nowUTC, startUTC time.Time, description string, dbPath string) (uuid.UUID, error) {
+func insertNewEntry(ctx context.Context, tx *sql.Tx, nowUTC, startUTC time.Time, taskPageID, description *string, dbPath string) (uuid.UUID, error) {
 	newID := uuid.New()
 	updatedAtUTCFormatted := ToDBString(nowUTC)
 	startUTCFormatted := ToDBString(startUTC)
 
 	result, err := tx.ExecContext(ctx, `
-	INSERT INTO entries(id, context_id, start_utc, description, updated_at)
+	INSERT INTO entries(id, context_id, start_utc, task_page_id, description, updated_at)
 	SELECT
-	? AS id,
+	?1 AS id,
 	contexts.id AS context_id,
-	? AS start_utc,
-	? AS description,
-	? AS updated_at
-	FROM contexts WHERE id = ?;
-	`, newID, startUTCFormatted, description, updatedAtUTCFormatted, DefaultContextID)
+	?2 AS start_utc,
+	?6 AS task_page_id,
+	?3 AS description,
+	?4 AS updated_at
+	FROM contexts WHERE id = ?5;
+	`, newID, startUTCFormatted, description, updatedAtUTCFormatted, DefaultContextID, taskPageID)
 	if err != nil {
 		return uuid.Nil, &clierr.Error{Code: clierr.Internal, Message: "error writing new entry", Cause: err}
 	}

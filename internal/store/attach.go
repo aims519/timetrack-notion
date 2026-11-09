@@ -11,7 +11,7 @@ import (
 )
 
 // AttachTaskToEntry attempts to attach a task to an entry, using selectors provided by the user
-func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, taskOrder *float64, taskID *string, all bool, nowUTC time.Time) (Entry, error) {
+func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, task TaskSelector, nowUTC time.Time) (Entry, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
 		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
@@ -19,7 +19,7 @@ func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, taskO
 	defer func() { _ = tx.Rollback() }()
 
 	// Lookup task
-	foundTaskID, err := lookupTask(ctx, tx, taskOrder, taskID, all, s.dbPath)
+	foundTaskID, err := lookupTask(ctx, tx, task, s.dbPath)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -142,11 +142,11 @@ func mostRecentEntry(ctx context.Context, tx *sql.Tx, dbPath, contextID string) 
 
 // lookupTask attempts to look up a task by its order number if that's the selector the user provided.
 // Otherwise, by ID
-func lookupTask(ctx context.Context, tx *sql.Tx, taskOrder *float64, taskID *string, all bool, dbPath string) (string, error) {
-	if taskOrder != nil {
-		return taskByOrderNumber(ctx, tx, *taskOrder, all, dbPath)
-	} else if taskID != nil {
-		return taskByID(ctx, tx, *taskID, dbPath)
+func lookupTask(ctx context.Context, tx *sql.Tx, task TaskSelector, dbPath string) (string, error) {
+	if task.Order != nil {
+		return taskByOrderNumber(ctx, tx, *task.Order, task.All, dbPath)
+	} else if task.PageID != nil {
+		return taskByID(ctx, tx, *task.PageID, dbPath)
 	}
 
 	return "", ErrTaskNotFound
@@ -245,4 +245,19 @@ func updateEntryWithTask(ctx context.Context, tx *sql.Tx, taskPageID, contextID,
 	}
 
 	return nil
+}
+
+// TaskSelector is a representation of a user-provided task selector, which
+// can either be an order number or page ID. The all boolean determines whether
+// tasks marked as 'done' are allowed
+type TaskSelector struct {
+	Order  *float64
+	PageID *string
+	All    bool
+}
+
+// hasValue returns true if either the order number
+// or pageID is not nil
+func (ts TaskSelector) hasValue() bool {
+	return ts.Order != nil || ts.PageID != nil
 }

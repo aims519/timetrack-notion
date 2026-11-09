@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,12 +15,14 @@ func TestStartNewTimer_NewEntry(t *testing.T) {
 	tests := []struct {
 		name        string
 		startUTC    time.Time
-		description string
+		description *string
 		wantStored  string
 	}{
-		{"utc_start", time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), "writing tests", "2026-10-19T09:00:00.000000000Z"},
-		{"nanoseconds_kept", time.Date(2026, 10, 19, 9, 0, 0, 123456789, time.UTC), "writing tests", "2026-10-19T09:00:00.123456789Z"},
-		{"non_utc_start_stored_as_utc", time.Date(2026, 10, 19, 10, 0, 0, 0, time.FixedZone("plus1", 60*60)), "writing tests", "2026-10-19T09:00:00.000000000Z"},
+		{"utc_start", time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), ptr("writing tests"), "2026-10-19T09:00:00.000000000Z"},
+		{"nanoseconds_kept", time.Date(2026, 10, 19, 9, 0, 0, 123456789, time.UTC), ptr("writing tests"), "2026-10-19T09:00:00.123456789Z"},
+		{"non_utc_start_stored_as_utc", time.Date(2026, 10, 19, 10, 0, 0, 0, time.FixedZone("plus1", 60*60)), ptr("writing tests"), "2026-10-19T09:00:00.000000000Z"},
+		// A start with only a task has no description, which is stored as NULL, not "" (§8)
+		{"no_description", time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), nil, "2026-10-19T09:00:00.000000000Z"},
 	}
 
 	for _, tc := range tests {
@@ -27,7 +30,7 @@ func TestStartNewTimer_NewEntry(t *testing.T) {
 			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 
 			before := time.Now()
-			got, err := st.StartNewTimer(t.Context(), tc.startUTC, tc.description)
+			got, err := st.StartNewTimer(t.Context(), tc.startUTC, TaskSelector{}, tc.description)
 			after := time.Now()
 			if err != nil {
 				t.Fatalf("StartNewTimer() want nil error, got %v", err)
@@ -37,9 +40,7 @@ func TestStartNewTimer_NewEntry(t *testing.T) {
 			if _, err := uuid.Parse(got.ID); err != nil {
 				t.Errorf("ID want a UUID, got %q: %v", got.ID, err)
 			}
-			if got.Description == nil || *got.Description != tc.description {
-				t.Errorf("Description want %q, got %v", tc.description, got.Description)
-			}
+			checkStringPtr(t, "Description", got.Description, tc.description)
 			if !got.StartUTC.Equal(tc.startUTC) {
 				t.Errorf("StartUTC want %v, got %v", tc.startUTC, got.StartUTC)
 			}
@@ -64,13 +65,15 @@ func TestStartNewTimer_NewEntry(t *testing.T) {
 				t.Fatalf("entries want 1 row, got %d", n)
 			}
 			var storedStart string
-			err = st.connectionPool.QueryRowContext(t.Context(), "SELECT start_utc FROM entries WHERE id = ?", got.ID).Scan(&storedStart)
+			var storedDescription *string
+			err = st.connectionPool.QueryRowContext(t.Context(), "SELECT start_utc, description FROM entries WHERE id = ?", got.ID).Scan(&storedStart, &storedDescription)
 			if err != nil {
 				t.Fatalf("scan failed: %v", err)
 			}
 			if storedStart != tc.wantStored {
 				t.Errorf("start_utc want %q, got %q", tc.wantStored, storedStart)
 			}
+			checkStringPtr(t, "stored description", storedDescription, tc.description)
 		})
 	}
 }
@@ -91,7 +94,7 @@ func TestStartNewTimer_MissingContext(t *testing.T) {
 		t.Fatalf("delete context failed: %v", err)
 	}
 
-	got, err := st.StartNewTimer(t.Context(), time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), "writing tests")
+	got, err := st.StartNewTimer(t.Context(), time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), TaskSelector{}, ptr("writing tests"))
 
 	var errcli *clierr.Error
 	if !errors.As(err, &errcli) {
@@ -145,7 +148,7 @@ func TestStartNewTimer_ExistingEntries(t *testing.T) {
 				t.Fatalf("existing entry %q: insert failed: %v", tc.existing.id, err)
 			}
 
-			got, err := st.StartNewTimer(t.Context(), time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC), "writing tests")
+			got, err := st.StartNewTimer(t.Context(), time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC), TaskSelector{}, ptr("writing tests"))
 
 			if tc.wantCode == "" {
 				if err != nil {
@@ -189,7 +192,7 @@ func TestSwitchTimer_MissingContext(t *testing.T) {
 		t.Fatalf("delete context failed: %v", err)
 	}
 
-	started, stopped, err := st.SwitchTimer(t.Context(), time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), "writing tests")
+	started, stopped, err := st.SwitchTimer(t.Context(), time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), TaskSelector{}, ptr("writing tests"))
 
 	var errcli *clierr.Error
 	if !errors.As(err, &errcli) {
@@ -255,7 +258,7 @@ func TestSwitchTimer_ExistingEntries(t *testing.T) {
 			}
 
 			before := time.Now()
-			started, stopped, err := st.SwitchTimer(t.Context(), switchAt, "writing tests")
+			started, stopped, err := st.SwitchTimer(t.Context(), switchAt, TaskSelector{}, ptr("writing tests"))
 			after := time.Now()
 			if err != nil {
 				t.Fatalf("SwitchTimer() want nil error, got %v", err)
@@ -362,7 +365,7 @@ func TestSwitchTimer_NotAfterRunningStart(t *testing.T) {
 				t.Fatalf("running entry: insert failed: %v", err)
 			}
 
-			started, stopped, err := st.SwitchTimer(t.Context(), tc.switchAt, "writing tests")
+			started, stopped, err := st.SwitchTimer(t.Context(), tc.switchAt, TaskSelector{}, ptr("writing tests"))
 
 			var errcli *clierr.Error
 			if !errors.As(err, &errcli) {
@@ -389,6 +392,205 @@ func TestSwitchTimer_NotAfterRunningStart(t *testing.T) {
 			}
 			if storedEnd != nil {
 				t.Errorf("running end_utc want NULL, got %q", *storedEnd)
+			}
+		})
+	}
+}
+
+// startTasks are the cached tasks the task selector tests start against
+var startTasks = []listTask{
+	{pageID: "task_open", name: "Open task", order: ptr(1.0)},
+	{pageID: "task_done", name: "Done task", order: ptr(2.0), done: true},
+	{pageID: "task_gone", name: "Gone task", order: ptr(3.0), gone: true},
+	{pageID: "task_dup_a", name: "Dup A", order: ptr(4.0)},
+	{pageID: "task_dup_b", name: "Dup B", order: ptr(4.0)},
+	{pageID: "task_five", name: "Five", order: ptr(5.0)},
+	{pageID: "task_five_done", name: "Five done", order: ptr(5.0), done: true},
+}
+
+// checkStartTaskError checks a failed task lookup: ErrTaskNotFound, or an *AmbiguousTaskError
+// holding the wanted candidates' page IDs in any order
+func checkStartTaskError(t *testing.T, err error, wantCandidates []string) {
+	t.Helper()
+
+	if wantCandidates == nil {
+		checkTaskNotFound(t, err)
+		return
+	}
+
+	var ambErr *AmbiguousTaskError
+	if !errors.As(err, &ambErr) {
+		t.Fatalf("want *AmbiguousTaskError, got %T: %v", err, err)
+	}
+	gotIDs := listedPageIDs(ambErr.Candidates)
+	slices.Sort(gotIDs)
+	if !slices.Equal(gotIDs, wantCandidates) {
+		t.Errorf("Candidates = %q, want %q", gotIDs, wantCandidates)
+	}
+}
+
+func TestStartNewTimer_Task(t *testing.T) {
+	tests := []struct {
+		name           string
+		task           TaskSelector
+		wantTaskID     string // empty for no task, or when the lookup should fail
+		wantTaskName   string
+		wantFail       bool     // the lookup fails and nothing is started
+		wantCandidates []string // sorted page IDs when the order is ambiguous; nil when not found
+	}{
+		{name: "no_selector"},
+		{name: "id_open", task: TaskSelector{PageID: ptr("task_open")}, wantTaskID: "task_open", wantTaskName: "Open task"},
+		{name: "order_open", task: TaskSelector{Order: ptr(1.0)}, wantTaskID: "task_open", wantTaskName: "Open task"},
+		// IDs match the whole cache, done tasks included (§3.1)
+		{name: "id_done", task: TaskSelector{PageID: ptr("task_done")}, wantTaskID: "task_done", wantTaskName: "Done task"},
+		// Order numbers cover only open tasks, and start has no --all yet
+		{name: "order_done", task: TaskSelector{Order: ptr(2.0)}, wantFail: true},
+		// All adds done tasks to order numbers (§3.1)
+		{name: "order_done_all", task: TaskSelector{Order: ptr(2.0), All: true}, wantTaskID: "task_done", wantTaskName: "Done task"},
+		{name: "order_open_all", task: TaskSelector{Order: ptr(1.0), All: true}, wantTaskID: "task_open", wantTaskName: "Open task"},
+		{name: "id_done_all", task: TaskSelector{PageID: ptr("task_done"), All: true}, wantTaskID: "task_done", wantTaskName: "Done task"},
+		// Gone tasks never match, even with All
+		{name: "id_gone", task: TaskSelector{PageID: ptr("task_gone")}, wantFail: true},
+		{name: "order_gone", task: TaskSelector{Order: ptr(3.0)}, wantFail: true},
+		{name: "order_gone_all", task: TaskSelector{Order: ptr(3.0), All: true}, wantFail: true},
+		{name: "id_unknown", task: TaskSelector{PageID: ptr("task_unknown")}, wantFail: true},
+		{name: "order_unknown", task: TaskSelector{Order: ptr(9.0)}, wantFail: true},
+		{name: "order_ambiguous", task: TaskSelector{Order: ptr(4.0)}, wantFail: true, wantCandidates: []string{"task_dup_a", "task_dup_b"}},
+		// A done task sharing an open task's order only makes it ambiguous with All
+		{name: "order_shared_with_done", task: TaskSelector{Order: ptr(5.0)}, wantTaskID: "task_five", wantTaskName: "Five"},
+		{name: "order_shared_with_done_all", task: TaskSelector{Order: ptr(5.0), All: true}, wantFail: true, wantCandidates: []string{"task_five", "task_five_done"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListTasks(t, st, startTasks)
+
+			got, err := st.StartNewTimer(t.Context(), time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC), tc.task, ptr("writing tests"))
+
+			if tc.wantFail {
+				checkStartTaskError(t, err, tc.wantCandidates)
+				if got.ID != "" {
+					t.Errorf("ID want empty on error, got %q", got.ID)
+				}
+				if n := countRows(t, st.connectionPool, "entries"); n != 0 {
+					t.Errorf("entries want 0 rows, got %d", n)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("StartNewTimer() want nil error, got %v", err)
+			}
+
+			// The description is still stored alongside the task
+			if got.Description == nil || *got.Description != "writing tests" {
+				t.Errorf("Description want %q, got %v", "writing tests", got.Description)
+			}
+
+			stored := readStoredEntries(t, st)[got.ID].taskPageID
+			if tc.wantTaskID == "" {
+				if got.TaskPageID != nil {
+					t.Errorf("TaskPageID want nil, got %q", *got.TaskPageID)
+				}
+				if stored.Valid {
+					t.Errorf("stored task_page_id want NULL, got %q", stored.String)
+				}
+				return
+			}
+
+			if got.TaskPageID == nil || *got.TaskPageID != tc.wantTaskID {
+				t.Errorf("TaskPageID want %q, got %v", tc.wantTaskID, got.TaskPageID)
+			}
+			if got.TaskName == nil || *got.TaskName != tc.wantTaskName {
+				t.Errorf("TaskName want %q, got %v", tc.wantTaskName, got.TaskName)
+			}
+			if !stored.Valid || stored.String != tc.wantTaskID {
+				t.Errorf("stored task_page_id want %q, got %+v", tc.wantTaskID, stored)
+			}
+		})
+	}
+}
+
+func TestSwitchTimer_Task(t *testing.T) {
+	const insert = "INSERT INTO entries (id, context_id, start_utc, task_page_id, updated_at) VALUES (?, ?, ?, ?, ?)"
+	const start = "2026-10-19T09:00:00.000000000Z"
+	const runningID = "11111111-1111-1111-1111-111111111111"
+	switchAt := time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name           string
+		task           TaskSelector
+		wantTaskID     string   // empty for no task, or when the lookup should fail
+		wantFail       bool     // the lookup fails and the running entry is left running
+		wantCandidates []string // sorted page IDs when the order is ambiguous; nil when not found
+	}{
+		{name: "no_selector"},
+		{name: "id_open", task: TaskSelector{PageID: ptr("task_open")}, wantTaskID: "task_open"},
+		{name: "order_open", task: TaskSelector{Order: ptr(1.0)}, wantTaskID: "task_open"},
+		{name: "order_done", task: TaskSelector{Order: ptr(2.0)}, wantFail: true},
+		{name: "order_done_all", task: TaskSelector{Order: ptr(2.0), All: true}, wantTaskID: "task_done"},
+		{name: "id_unknown", task: TaskSelector{PageID: ptr("task_unknown")}, wantFail: true},
+		{name: "order_ambiguous", task: TaskSelector{Order: ptr(4.0)}, wantFail: true, wantCandidates: []string{"task_dup_a", "task_dup_b"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			insertListTasks(t, st, startTasks)
+
+			// The running entry has its own task, which the switch must not change
+			_, err := st.connectionPool.ExecContext(t.Context(), insert, runningID, testContextID, start, "task_done", start)
+			if err != nil {
+				t.Fatalf("running entry: insert failed: %v", err)
+			}
+
+			started, stopped, err := st.SwitchTimer(t.Context(), switchAt, tc.task, ptr("writing tests"))
+
+			if tc.wantFail {
+				checkStartTaskError(t, err, tc.wantCandidates)
+				if started.ID != "" {
+					t.Errorf("started ID want empty on error, got %q", started.ID)
+				}
+				if stopped != nil {
+					t.Errorf("stopped want nil on error, got %+v", *stopped)
+				}
+
+				// A failed lookup leaves the old timer running and writes no new entry (§3.1)
+				if n := countRows(t, st.connectionPool, "entries"); n != 1 {
+					t.Errorf("entries want 1 row, got %d", n)
+				}
+				var storedEnd *string
+				err = st.connectionPool.QueryRowContext(t.Context(), "SELECT end_utc FROM entries WHERE id = ?", runningID).Scan(&storedEnd)
+				if err != nil {
+					t.Fatalf("scan running entry failed: %v", err)
+				}
+				if storedEnd != nil {
+					t.Errorf("running end_utc want NULL, got %q", *storedEnd)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("SwitchTimer() want nil error, got %v", err)
+			}
+
+			if tc.wantTaskID == "" {
+				if started.TaskPageID != nil {
+					t.Errorf("started TaskPageID want nil, got %q", *started.TaskPageID)
+				}
+			} else if started.TaskPageID == nil || *started.TaskPageID != tc.wantTaskID {
+				t.Errorf("started TaskPageID want %q, got %v", tc.wantTaskID, started.TaskPageID)
+			}
+			if stored := readStoredEntries(t, st)[started.ID].taskPageID; stored.String != tc.wantTaskID {
+				t.Errorf("stored task_page_id want %q, got %+v", tc.wantTaskID, stored)
+			}
+
+			if stopped == nil {
+				t.Fatalf("stopped want entry %q, got nil", runningID)
+			}
+			if stopped.TaskPageID == nil || *stopped.TaskPageID != "task_done" {
+				t.Errorf("stopped TaskPageID want unchanged %q, got %v", "task_done", stopped.TaskPageID)
 			}
 		})
 	}

@@ -2,21 +2,23 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/output"
+	"github.com/aims519/timetrack-notion/internal/store"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
 	"github.com/spf13/cobra"
 )
 
 type startArgs struct {
-	task        string
-	description string
-	pickTask    bool
-	switchTask  bool
-	at          string
-	ago         string
+	taskSelector string
+	description  *string
+	pickTask     bool
+	switchTask   bool
+	at           string
+	ago          string
 }
 
 func newStartCmd(a *app) *cobra.Command {
@@ -30,7 +32,7 @@ func newStartCmd(a *app) *cobra.Command {
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
-				sa.description = args[0]
+				sa.description = &args[0]
 			}
 
 			loc, err := timeparse.CurrentLocation()
@@ -53,7 +55,7 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			startDoc, err := executeUpdates(cmd.Context(), a, sa, startUTC, shortIDMap)
+			startDoc, err := executeStartUpdates(cmd.Context(), a, sa, startUTC, shortIDMap)
 			if err != nil {
 				return err
 			}
@@ -63,7 +65,7 @@ func newStartCmd(a *app) *cobra.Command {
 	}
 
 	startCmd.Flags().BoolVar(&sa.switchTask, "switch", false, "stop a previously running time tracking entry and start a new one")
-	startCmd.Flags().StringVarP(&sa.task, "task", "t", "", "task selector: can be a full page ID, short ID, or task order number")
+	startCmd.Flags().StringVarP(&sa.taskSelector, "task", "t", "", "task selector: can be a full page ID, short ID, or task order number")
 	startCmd.Flags().BoolVar(&sa.pickTask, "pick", false, "open a picker to choose a task")
 	startCmd.Flags().StringVar(&sa.at, "at", "", "start time tracking at: can be today in HH:MM format or RFC3339 (YYYY-MM-DDTHH:mm:ss)")
 	startCmd.Flags().StringVar(&sa.ago, "ago", "", "start time tracking from a time in the past: expects a duration (e.g. \"1h10m\", \"2h\", \"30m\")")
@@ -78,11 +80,15 @@ func validateStartFlags(s startArgs, now time.Time, loc *time.Location) (time.Ti
 		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "only one of --ago or --at values are accepted"}
 	}
 
-	if (s.task == "" && !s.pickTask) && s.description == "" {
+	if (s.taskSelector == "" && !s.pickTask) && s.description == nil {
 		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "at least one of [description] or --task/--pick must be provided"}
 	}
 
-	if s.task != "" && s.pickTask {
+	if s.description != nil && *s.description == "" {
+		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "[description] must not be empty if provided"}
+	}
+
+	if s.taskSelector != "" && s.pickTask {
 		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "either --task or --pick can be set, not both"}
 	}
 
@@ -103,27 +109,33 @@ func rejectUnimplemented(sa startArgs) error {
 		return &clierr.Error{Code: clierr.Usage, Message: "--pick is not supported yet"}
 	}
 
-	if sa.task != "" {
-		return &clierr.Error{Code: clierr.Usage, Message: "--task is not supported yet"}
-	}
-
 	return nil
 }
 
-func executeUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string) (output.StartDoc, error) {
+func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string) (output.StartDoc, error) {
+	task := store.TaskSelector{}
+	if s.taskSelector != "" {
+		order, pageID, found := resolveTaskLookupID(s.taskSelector, shortIDMap)
+		if !found {
+			return output.StartDoc{}, &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", s.taskSelector), Details: map[string]any{"selector": s.taskSelector}}
+		}
+		task.Order = order
+		task.PageID = pageID
+	}
+
 	if s.switchTask {
-		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, s.description)
+		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, task, s.description)
 		if err != nil {
-			return output.StartDoc{}, err
+			return output.StartDoc{}, handleTaskErrors(err, shortIDMap, s.taskSelector, "")
 		}
 
 		return output.NewStartDoc(mapDBEntry(startedEntry, shortIDMap),
 			mapNullableDBEntry(stoppedEntry, shortIDMap), nil), nil
 	}
 
-	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, s.description)
+	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, task, s.description)
 	if err != nil {
-		return output.StartDoc{}, err
+		return output.StartDoc{}, handleTaskErrors(err, shortIDMap, s.taskSelector, "")
 	}
 
 	return output.NewStartDoc(mapDBEntry(dbEntry, shortIDMap),

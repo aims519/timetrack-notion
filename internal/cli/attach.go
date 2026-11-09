@@ -82,24 +82,11 @@ func newAttachCmd(a *app) *cobra.Command {
 			}
 
 			nowUTC := time.Now().UTC()
-			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), order, taskID, all, nowUTC)
+			task := store.TaskSelector{Order: order, PageID: taskID}
+			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), task, all, nowUTC)
 
-			var ambiguousTaskErr *store.AmbiguousTaskError
-			if errors.As(err, &ambiguousTaskErr) {
-				listDoc := mapDbTasks(ambiguousTaskErr.Candidates, shortIDMap, false, nil)
-				return &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique task", Details: map[string]any{"selector": selector, "candidates": listDoc.Tasks}}
-			}
-
-			var ambiguousEntryErr *store.AmbiguousEntryError
-			if errors.As(err, &ambiguousEntryErr) {
-				return ambiguousEntryError(entryIDPrefix, ambiguousEntryErr.Candidates, shortIDMap)
-			}
-
-			if errors.Is(err, store.ErrTaskNotFound) {
-				return &clierr.Error{Code: clierr.NotFound, Message: store.ErrTaskNotFound.Error(), Details: map[string]any{"selector": selector}}
-			}
 			if err != nil {
-				return err
+				return handleTaskErrors(err, shortIDMap, selector, entryIDPrefix)
 			}
 
 			doc := output.NewAttachDoc(mapDBEntry(entry, shortIDMap), nil)
@@ -212,4 +199,25 @@ func taskListForPicker(ctx context.Context, s *store.Store, all bool) ([]output.
 	doc := mapDbTasks(tasks, shortIDMap, false, nil)
 
 	return doc.Tasks, nil
+}
+
+// handleTaskErrors takes errors returned from commands that attach tasks to entries, and provides the appropriate context
+// for the final CLI error
+func handleTaskErrors(err error, shortIDMap map[string]string, taskSelector, entryIDPrefix string) error {
+	var ambiguousTaskErr *store.AmbiguousTaskError
+	if errors.As(err, &ambiguousTaskErr) {
+		listDoc := mapDbTasks(ambiguousTaskErr.Candidates, shortIDMap, false, nil)
+		return &clierr.Error{Code: clierr.AmbiguousSelector, Message: "unable to find unique task", Details: map[string]any{"selector": taskSelector, "candidates": listDoc.Tasks}}
+	}
+
+	var ambiguousEntryErr *store.AmbiguousEntryError
+	if errors.As(err, &ambiguousEntryErr) {
+		return ambiguousEntryError(entryIDPrefix, ambiguousEntryErr.Candidates, shortIDMap)
+	}
+
+	if errors.Is(err, store.ErrTaskNotFound) {
+		return &clierr.Error{Code: clierr.NotFound, Message: store.ErrTaskNotFound.Error(), Details: map[string]any{"selector": taskSelector}}
+	}
+
+	return err
 }

@@ -22,6 +22,7 @@ type startArgs struct {
 	allTasks     bool
 }
 
+// newStartCmd builds and returns the tt start command with associated flags
 func newStartCmd(a *app) *cobra.Command {
 	var sa startArgs
 
@@ -45,6 +46,14 @@ func newStartCmd(a *app) *cobra.Command {
 			startUTC, err := validateStartFlags(sa, time.Now(), loc, canPrompt)
 			if err != nil {
 				return err
+			}
+
+			// Check if Notion context is connected
+			if sa.pickTask || sa.taskSelector != "" {
+				err = requireConnectedContext(cmd.Context(), a.db, store.DefaultContextID)
+				if err != nil {
+					return err
+				}
 			}
 
 			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)

@@ -397,6 +397,7 @@ func TestRun_Start_TaskNotFound_ReportsSelectorAsTyped(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			t.Setenv("TT_DB", dbPath)
 			t.Setenv("TT_TIMEZONE", "UTC")
+			seedConnectedContext(t, dbPath)
 
 			// Two full refreshes, the second without goneID, so it's cached but marked gone
 			edited := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
@@ -469,6 +470,7 @@ func TestRun_Start_AmbiguousOrder_ReturnsTaskItems(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	t.Setenv("TT_DB", dbPath)
 	t.Setenv("TT_TIMEZONE", "UTC")
+	seedConnectedContext(t, dbPath)
 
 	edited := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
 	onStore(t, dbPath, func(st *store.Store) {
@@ -548,6 +550,7 @@ func TestRun_Start_All(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			t.Setenv("TT_DB", dbPath)
 			t.Setenv("TT_TIMEZONE", "UTC")
+			seedConnectedContext(t, dbPath)
 
 			edited := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
 			onStore(t, dbPath, func(st *store.Store) {
@@ -601,5 +604,100 @@ func TestRun_Start_All(t *testing.T) {
 				t.Errorf("stopped = %+v, want stopped %t", got.Stopped, tc.wantStopped)
 			}
 		})
+	}
+}
+
+// In a local-only context there is no task cache, so a task selector fails with not_initialised
+// (exit 5) before any lookup, and nothing is started or changed. A start with only a description
+// still works (§4). --pick can't be reached here: without a terminal it's a usage error first
+func TestRun_TaskSelector_NotInitialised(t *testing.T) {
+	tests := []struct {
+		name    string
+		running bool // start a plain timer first
+		args    []string
+	}{
+		{name: "start_order", args: []string{"start", "-t", "1"}},
+		{name: "start_full_id", args: []string{"start", "-t", attachTaskID}},
+		{name: "start_with_description", args: []string{"start", "-t", "1", "writing tests"}},
+		{name: "start_all", args: []string{"start", "-t", "1", "--all"}},
+		{name: "start_switch", running: true, args: []string{"start", "--switch", "-t", "1"}},
+		{name: "attach", running: true, args: []string{"attach", "1"}},
+		{name: "attach_full_id", running: true, args: []string{"attach", attachTaskID}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TT_DB", filepath.Join(t.TempDir(), "test.db"))
+			t.Setenv("TT_TIMEZONE", "UTC")
+
+			if tc.running {
+				code, _, stderr := runTT(t, "start", "organising calendar", "--at", "2026-01-01T09:00:00Z")
+				if code != 0 {
+					t.Fatalf("first start = %d, want 0 (stderr: %q)", code, stderr)
+				}
+			}
+
+			code, stdout, stderr := runTT(t, tc.args...)
+			if code != 5 {
+				t.Fatalf("Run(%v) = %d, want 5 (stdout: %q, stderr: %q)", tc.args, code, stdout, stderr)
+			}
+			if len(stdout) != 0 {
+				t.Errorf("stdout want empty on failure, got %q", stdout)
+			}
+
+			var got struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(stderr, &got); err != nil {
+				t.Fatalf("unable to decode error %q: %v", stderr, err)
+			}
+			if got.Error.Code != string(clierr.NotInitialised) {
+				t.Errorf("error.code want %q, got %q", clierr.NotInitialised, got.Error.Code)
+			}
+
+			// Nothing changed: the running timer is still running, with no task, and otherwise
+			// a plain start succeeds
+			code, stdout, stderr = runTT(t, "status")
+			if code != 0 {
+				t.Fatalf("status = %d, want 0 (stderr: %q)", code, stderr)
+			}
+			var status struct {
+				Running *struct {
+					Task *taskRefOutput `json:"task"`
+				} `json:"running"`
+			}
+			if err := json.Unmarshal(stdout, &status); err != nil {
+				t.Fatalf("unable to decode status output %q: %v", stdout, err)
+			}
+			if !tc.running {
+				if status.Running != nil {
+					t.Errorf("running want null, got %+v", *status.Running)
+				}
+				return
+			}
+			if status.Running == nil {
+				t.Fatalf("running want the first timer, got null")
+			}
+			if status.Running.Task != nil {
+				t.Errorf("running.task want null, got %+v", status.Running.Task)
+			}
+		})
+	}
+}
+
+// Descriptions don't need Notion, so start works in a local-only context (§4)
+func TestRun_Start_DescriptionOnly_NotConnected(t *testing.T) {
+	t.Setenv("TT_DB", filepath.Join(t.TempDir(), "test.db"))
+	t.Setenv("TT_TIMEZONE", "UTC")
+
+	for _, args := range [][]string{
+		{"start", "writing tests", "--at", "2026-01-01T09:00:00Z"},
+		{"start", "--switch", "reviewing", "--at", "2026-01-01T10:00:00Z"},
+	} {
+		if code, _, stderr := runTT(t, args...); code != 0 {
+			t.Errorf("Run(%v) = %d, want 0 (stderr: %q)", args, code, stderr)
+		}
 	}
 }

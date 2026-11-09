@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// newAttachCmd builds and returns the tt attach command with associated flags
 func newAttachCmd(a *app) *cobra.Command {
 	var entryIDPrefix string
 	var all bool
@@ -23,6 +24,12 @@ func newAttachCmd(a *app) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 && !a.canPrompt(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()) {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] argument is required when prompts are disabled (no terminal or --no-input)"}
+			}
+
+			// Check if Notion context is connected
+			err := requireConnectedContext(cmd.Context(), a.db, store.DefaultContextID)
+			if err != nil {
+				return err
 			}
 
 			// Database lookup (full ID, short ID, order)

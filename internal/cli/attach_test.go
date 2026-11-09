@@ -27,10 +27,32 @@ type attachOutput struct {
 	} `json:"entry"`
 }
 
-// seedAttachTask caches one open task to attach
+// seedConnectedContext stores everything tt init saves, so the default context counts as
+// connected (§4). It has no default project, so order numbers cover the whole cache
+func seedConnectedContext(t *testing.T, dbPath string) {
+	t.Helper()
+
+	onStore(t, dbPath, func(st *store.Store) {
+		nc, err := st.NotionContext(t.Context(), store.DefaultContextID)
+		if err != nil {
+			t.Fatalf("NotionContext(): %v", err)
+		}
+		nc.TasksDataSourceID = ptr("tasks-ds")
+		nc.ProjectsDataSourceID = ptr("projects-ds")
+		nc.EntriesDataSourceID = ptr("entries-ds")
+		nc.PropertyMap = map[string]string{"name": "Task", "project": "Project", "order": "Order", "done": "Done"}
+		if err := st.SaveNotionContext(t.Context(), nc); err != nil {
+			t.Fatalf("SaveNotionContext(): %v", err)
+		}
+	})
+}
+
+// seedAttachTask connects the context and caches one open task to attach. Task selectors need a
+// connected context (§4)
 func seedAttachTask(t *testing.T, dbPath string) {
 	t.Helper()
 
+	seedConnectedContext(t, dbPath)
 	edited := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
 	onStore(t, dbPath, func(st *store.Store) {
 		task := store.Task{ContextID: store.DefaultContextID, PageID: attachTaskID, Name: "Write tests", SortOrder: ptr(1.0), LastEditedTime: edited}
@@ -62,6 +84,7 @@ func TestRun_Attach_AmbiguousOrder_ReturnsTaskItems(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	t.Setenv("TT_DB", dbPath)
 	t.Setenv("TT_TIMEZONE", "UTC")
+	seedConnectedContext(t, dbPath)
 
 	edited := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
 	onStore(t, dbPath, func(st *store.Store) {
@@ -135,6 +158,7 @@ func TestRun_Attach_TaskNotFound_ReportsSelectorAsTyped(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			t.Setenv("TT_DB", dbPath)
 			t.Setenv("TT_TIMEZONE", "UTC")
+			seedConnectedContext(t, dbPath)
 
 			// Two full refreshes, the second without goneID, so it's cached but marked gone
 			edited := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)

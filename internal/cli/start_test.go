@@ -27,6 +27,7 @@ func TestValidateStartFlags_Error(t *testing.T) {
 		pick        bool
 		at          string
 		ago         string
+		canPrompt   bool
 		now         time.Time
 		loc         *time.Location
 		wantCode    clierr.ErrorCode
@@ -34,7 +35,10 @@ func TestValidateStartFlags_Error(t *testing.T) {
 		{name: "no_description_or_task", ago: "10m", now: now, loc: time.UTC, wantCode: clierr.Usage},
 		// An empty argument isn't a description, so it doesn't count as one (§3.1)
 		{name: "empty_description_no_task", description: ptr(""), now: now, loc: time.UTC, wantCode: clierr.Usage},
-		{name: "task_and_pick", task: "1.2", pick: true, ago: "10m", now: now, loc: time.UTC, wantCode: clierr.Usage},
+		{name: "task_and_pick", task: "1.2", pick: true, canPrompt: true, ago: "10m", now: now, loc: time.UTC, wantCode: clierr.Usage},
+		// --pick needs a terminal and no --no-input (§3.1, §8)
+		{name: "pick_without_prompts", pick: true, now: now, loc: time.UTC, wantCode: clierr.Usage},
+		{name: "pick_description_without_prompts", description: ptr("organising calendar"), pick: true, now: now, loc: time.UTC, wantCode: clierr.Usage},
 		{name: "ago_and_at_given", description: ptr("organising calendar"), at: "01:00", ago: "10m", now: now, loc: time.UTC, wantCode: clierr.Usage},
 		{name: "invalid_at", description: ptr("organising calendar"), at: "invalid", now: now, loc: time.UTC, wantCode: clierr.InvalidTime},
 		{name: "invalid_ago", description: ptr("organising calendar"), ago: "invalid", now: now, loc: time.UTC, wantCode: clierr.InvalidTime},
@@ -49,7 +53,7 @@ func TestValidateStartFlags_Error(t *testing.T) {
 				at:           tc.at,
 				ago:          tc.ago,
 			}
-			_, err := validateStartFlags(sa, tc.now, tc.loc)
+			_, err := validateStartFlags(sa, tc.now, tc.loc, tc.canPrompt)
 			var cliErr *clierr.Error
 			if !errors.As(err, &cliErr) {
 				t.Fatalf("got %v, want clierr.Error", err)
@@ -72,19 +76,21 @@ func TestValidateStartFlags_Success(t *testing.T) {
 		pick        bool
 		at          string
 		ago         string
+		canPrompt   bool // only --pick needs prompts; everything else must work without them
 		now         time.Time
 		loc         *time.Location
 	}{
 		{name: "description_only", description: ptr("organising calendar"), now: now, loc: time.UTC},
 		{name: "task_only", task: "1.1", now: now, loc: time.UTC},
-		{name: "pick_only", pick: true, now: now, loc: time.UTC},
+		{name: "pick_only", pick: true, canPrompt: true, now: now, loc: time.UTC},
 		{name: "description_at", description: ptr("organising calendar"), at: "01:00", now: now, loc: time.UTC},
 		{name: "description_ago", description: ptr("organising calendar"), ago: "10m", now: now, loc: time.UTC},
 		{name: "task_at", task: "1.1", at: "01:00", now: now, loc: time.UTC},
 		{name: "task_ago", task: "1.1", ago: "10m", now: now, loc: time.UTC},
-		{name: "pick_at", pick: true, at: "01:00", now: now, loc: time.UTC},
-		{name: "pick_ago", pick: true, ago: "10m", now: now, loc: time.UTC},
+		{name: "pick_at", pick: true, canPrompt: true, at: "01:00", now: now, loc: time.UTC},
+		{name: "pick_ago", pick: true, canPrompt: true, ago: "10m", now: now, loc: time.UTC},
 		{name: "description_task_at", description: ptr("organising calendar"), task: "1.1", at: "01:00", now: now, loc: time.UTC},
+		{name: "pick_description", description: ptr("organising calendar"), pick: true, canPrompt: true, now: now, loc: time.UTC},
 		{name: "description_task_ago", description: ptr("organising calendar"), task: "1.5", ago: "10m", now: now, loc: time.UTC},
 	}
 	for _, tc := range tests {
@@ -96,7 +102,7 @@ func TestValidateStartFlags_Success(t *testing.T) {
 				at:           tc.at,
 				ago:          tc.ago,
 			}
-			_, err := validateStartFlags(sa, tc.now, tc.loc)
+			_, err := validateStartFlags(sa, tc.now, tc.loc, tc.canPrompt)
 
 			if err != nil {
 				t.Fatalf("got %v, want nil", err)
@@ -105,14 +111,17 @@ func TestValidateStartFlags_Success(t *testing.T) {
 	}
 }
 
-func TestRun_Start_UnimplementedFlags(t *testing.T) {
+// --pick needs prompts, so without a terminal or with --no-input it's a usage error and nothing
+// is started. In tests stdout and stderr are buffers, never terminals (§3.1, §8)
+func TestRun_Start_PickWithoutPrompts_IsUsageError(t *testing.T) {
 	tests := []struct {
-		name     string
-		args     []string
-		wantFlag string // the flag the error message should name
+		name string
+		args []string
 	}{
-		{"pick_only", []string{"start", "--pick"}, "--pick"},
-		{"pick_with_description", []string{"start", "--pick", "organising calendar"}, "--pick"},
+		{"no_terminal", []string{"start", "--pick"}},
+		{"no_terminal_with_description", []string{"start", "--pick", "organising calendar"}},
+		{"no_input_flag", []string{"start", "--pick", "--no-input"}},
+		{"no_input_flag_with_description", []string{"start", "--pick", "--no-input", "organising calendar"}},
 	}
 
 	for _, tc := range tests {
@@ -143,8 +152,8 @@ func TestRun_Start_UnimplementedFlags(t *testing.T) {
 			if doc.Error.Code != string(clierr.Usage) {
 				t.Errorf("error code want %q, got %q", clierr.Usage, doc.Error.Code)
 			}
-			if !strings.Contains(doc.Error.Message, tc.wantFlag) {
-				t.Errorf("error message want it to name %s, got %q", tc.wantFlag, doc.Error.Message)
+			if !strings.Contains(doc.Error.Message, "--pick") {
+				t.Errorf("error message want it to name --pick, got %q", doc.Error.Message)
 			}
 
 			// Nothing was started, so a plain start on the same database succeeds

@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// newStatusCmd builds and returns the tt status command with associated flags
 func newStatusCmd(a *app) *cobra.Command {
 	statusCmd := &cobra.Command{
 		Use:     "status",

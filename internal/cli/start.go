@@ -22,6 +22,7 @@ type startArgs struct {
 	allTasks     bool
 }
 
+// newStartCmd builds and returns the tt start command with associated flags
 func newStartCmd(a *app) *cobra.Command {
 	var sa startArgs
 
@@ -48,12 +49,11 @@ func newStartCmd(a *app) *cobra.Command {
 			}
 
 			// Check if Notion context is connected
-			connected, err := a.db.ContextConnected(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if !connected && (sa.pickTask || sa.taskSelector != "") {
-				return &clierr.Error{Code: clierr.NotInitialised, Message: "notion context not connected, run 'tt init'"}
+			if sa.pickTask || sa.taskSelector != "" {
+				err = requireConnectedContext(cmd.Context(), a.db, store.DefaultContextID)
+				if err != nil {
+					return err
+				}
 			}
 
 			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)

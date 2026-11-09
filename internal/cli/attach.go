@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// newAttachCmd builds and returns the tt attach command with associated flags
 func newAttachCmd(a *app) *cobra.Command {
 	var entryIDPrefix string
 	var all bool
@@ -26,12 +27,9 @@ func newAttachCmd(a *app) *cobra.Command {
 			}
 
 			// Check if Notion context is connected
-			connected, err := a.db.ContextConnected(cmd.Context())
+			err := requireConnectedContext(cmd.Context(), a.db, store.DefaultContextID)
 			if err != nil {
 				return err
-			}
-			if !connected {
-				return &clierr.Error{Code: clierr.NotInitialised, Message: "notion context not connected, run 'tt init'"}
 			}
 
 			// Database lookup (full ID, short ID, order)

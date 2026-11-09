@@ -180,6 +180,7 @@ func connectedCases() []struct {
 	}
 }
 
+// ReadStatus reports the context as connected only when tt init has saved everything it needs
 func TestReadStatus_Connected(t *testing.T) {
 	for _, tc := range connectedCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -322,6 +323,7 @@ func TestWaitingEntriesCount(t *testing.T) {
 	}
 }
 
+// ContextConnected agrees with ReadStatus on what counts as connected, using the same cases
 func TestContextConnected(t *testing.T) {
 	for _, tc := range connectedCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -330,7 +332,7 @@ func TestContextConnected(t *testing.T) {
 				t.Fatalf("SaveNotionContext(): %v", err)
 			}
 
-			got, err := st.ContextConnected(t.Context())
+			got, err := st.ContextConnected(t.Context(), testContextID)
 			if err != nil {
 				t.Fatalf("ContextConnected() want nil error, got %v", err)
 			}
@@ -341,6 +343,7 @@ func TestContextConnected(t *testing.T) {
 	}
 }
 
+// A context row that has gone missing makes the database unusable, rather than not connected
 func TestContextConnected_MissingContext(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	st := openTestStore(t, dbPath)
@@ -355,7 +358,7 @@ func TestContextConnected_MissingContext(t *testing.T) {
 		t.Fatalf("delete context failed: %v", err)
 	}
 
-	_, err = st.ContextConnected(t.Context())
+	_, err = st.ContextConnected(t.Context(), testContextID)
 
 	var errcli *clierr.Error
 	if !errors.As(err, &errcli) {

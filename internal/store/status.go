@@ -22,6 +22,8 @@ type Status struct {
 	CountSummary CountSummary
 }
 
+// ReadStatus queries the database for running tasks, tasks started today, a summary of sync counts,
+// and whether the Notion context has been initialised
 func (s *Store) ReadStatus(ctx context.Context, todayStartUTC, todayEndUTC time.Time) (Status, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -44,7 +46,7 @@ func (s *Store) ReadStatus(ctx context.Context, todayStartUTC, todayEndUTC time.
 	}
 
 	// context connected?
-	connected, err := contextConnected(ctx, tx, s.dbPath)
+	connected, err := contextConnected(ctx, tx, DefaultContextID, s.dbPath)
 	if err != nil {
 		return Status{}, err
 	}
@@ -71,8 +73,9 @@ func (s *Store) ReadStatus(ctx context.Context, todayStartUTC, todayEndUTC time.
 	return result, nil
 }
 
-// contextConnected checks if the default context has the Notion tasks_db_id set, and returns true if so
-func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, error) {
+// contextConnected checks if a context has all the appropriate columns filled in for
+// a context to be usable, and returns true if so
+func contextConnected(ctx context.Context, tx *sql.Tx, contextID, dbPath string) (bool, error) {
 	var (
 		tasksDataSourceID    *string
 		projectsDataSourceID *string
@@ -85,7 +88,7 @@ func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, err
 		entries_data_source_id,
 		property_map
 	 	FROM contexts WHERE id = ?
-	 `, DefaultContextID).Scan(&tasksDataSourceID, &projectsDataSourceID, &entriesDataSourceID, &propertyMap)
+	 `, contextID).Scan(&tasksDataSourceID, &projectsDataSourceID, &entriesDataSourceID, &propertyMap)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "no context found", Details: map[string]any{"path": dbPath}}
 	}
@@ -100,14 +103,17 @@ func contextConnected(ctx context.Context, tx *sql.Tx, dbPath string) (bool, err
 	return result, nil
 }
 
-func (s *Store) ContextConnected(ctx context.Context) (bool, error) {
+// ContextConnected checks if a Notion context has been correctly initialised.
+// Designed to be called before any operations that require the context to be connected such as
+// attach or start with --task or --pick
+func (s *Store) ContextConnected(ctx context.Context, contextID string) (bool, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return false, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	return contextConnected(ctx, tx, s.dbPath)
+	return contextConnected(ctx, tx, contextID, s.dbPath)
 }
 
 // entriesStartedToday returns all entries that were started during the provided start and end times

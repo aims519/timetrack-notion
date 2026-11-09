@@ -63,7 +63,12 @@ func newStartCmd(a *app) *cobra.Command {
 
 			var taskPageID *string
 			if sa.pickTask {
-				selectedPageID, err := runPickerForm(cmd.Context(), a.db, sa.allTasks, shortIDMap, cmd.InOrStdin(), cmd.ErrOrStderr(), "start")
+				allTasks, err := loadAllTasks(cmd.Context(), a.db, sa.allTasks, shortIDMap, "start")
+				if err != nil {
+					return err
+				}
+
+				selectedPageID, err := runPickerForm(cmd.Context(), allTasks, cmd.InOrStdin(), cmd.ErrOrStderr())
 				if err != nil {
 					return err
 				}

@@ -22,7 +22,8 @@ func newAttachCmd(a *app) *cobra.Command {
 		Short: "Link a Notion task to a time entry. Task is matched based on the selector provided",
 		Long:  "If no --entry ID prefix is provided, defaults to the currently running entry, then the most recent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 && !a.canPrompt(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()) {
+			canPrompt := a.canPrompt(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			if len(args) == 0 && !canPrompt {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] argument is required when prompts are disabled (no terminal or --no-input)"}
 			}
 
@@ -41,7 +42,12 @@ func newAttachCmd(a *app) *cobra.Command {
 			var selector string
 			if len(args) == 0 {
 				// present task picker
-				pickedTaskPageID, err := runPickerForm(cmd.Context(), a.db, all, shortIDMap, cmd.InOrStdin(), cmd.ErrOrStderr(), "attach")
+				allTasks, err := loadAllTasks(cmd.Context(), a.db, all, shortIDMap, "attach")
+				if err != nil {
+					return err
+				}
+
+				pickedTaskPageID, err := runPickerForm(cmd.Context(), allTasks, cmd.InOrStdin(), cmd.ErrOrStderr())
 				if err != nil {
 					return err
 				}
@@ -65,7 +71,17 @@ func newAttachCmd(a *app) *cobra.Command {
 				return err
 			}
 			taskPageID, err := a.db.ResolveTask(cmd.Context(), taskSelector)
-			if err != nil {
+			var ambigErr *store.AmbiguousTaskError
+			if canPrompt && errors.As(err, &ambigErr) {
+				pickedCandidate, err := runPickerForm(cmd.Context(),
+					mapDbTasks(ambigErr.Candidates, shortIDMap, false, nil).Tasks,
+					cmd.InOrStdin(),
+					cmd.ErrOrStderr())
+				if err != nil {
+					return err
+				}
+				taskPageID = &pickedCandidate
+			} else if err != nil {
 				return handleTaskErrors(err, shortIDMap, selector, entryIDPrefix)
 			}
 

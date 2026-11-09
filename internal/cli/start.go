@@ -19,6 +19,7 @@ type startArgs struct {
 	switchTask   bool
 	at           string
 	ago          string
+	allTasks     bool
 }
 
 func newStartCmd(a *app) *cobra.Command {
@@ -69,6 +70,7 @@ func newStartCmd(a *app) *cobra.Command {
 	startCmd.Flags().BoolVar(&sa.pickTask, "pick", false, "open a picker to choose a task")
 	startCmd.Flags().StringVar(&sa.at, "at", "", "start time tracking at: can be today in HH:MM format or RFC3339 (YYYY-MM-DDTHH:mm:ss)")
 	startCmd.Flags().StringVar(&sa.ago, "ago", "", "start time tracking from a time in the past: expects a duration (e.g. \"1h10m\", \"2h\", \"30m\")")
+	startCmd.Flags().BoolVar(&sa.allTasks, "all", false, "include tasks already marked 'done'")
 
 	return startCmd
 }
@@ -113,7 +115,7 @@ func rejectUnimplemented(sa startArgs) error {
 }
 
 func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string) (output.StartDoc, error) {
-	task := store.TaskSelector{}
+	task := store.TaskSelector{All: s.allTasks}
 	if s.taskSelector != "" {
 		order, pageID, found := resolveTaskLookupID(s.taskSelector, shortIDMap)
 		if !found {

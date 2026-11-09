@@ -404,6 +404,8 @@ var startTasks = []listTask{
 	{pageID: "task_gone", name: "Gone task", order: ptr(3.0), gone: true},
 	{pageID: "task_dup_a", name: "Dup A", order: ptr(4.0)},
 	{pageID: "task_dup_b", name: "Dup B", order: ptr(4.0)},
+	{pageID: "task_five", name: "Five", order: ptr(5.0)},
+	{pageID: "task_five_done", name: "Five done", order: ptr(5.0), done: true},
 }
 
 // checkStartTaskError checks a failed task lookup: ErrTaskNotFound, or an *AmbiguousTaskError
@@ -443,12 +445,20 @@ func TestStartNewTimer_Task(t *testing.T) {
 		{name: "id_done", task: TaskSelector{PageID: ptr("task_done")}, wantTaskID: "task_done", wantTaskName: "Done task"},
 		// Order numbers cover only open tasks, and start has no --all yet
 		{name: "order_done", task: TaskSelector{Order: ptr(2.0)}, wantFail: true},
-		// Gone tasks never match
+		// All adds done tasks to order numbers (§3.1)
+		{name: "order_done_all", task: TaskSelector{Order: ptr(2.0), All: true}, wantTaskID: "task_done", wantTaskName: "Done task"},
+		{name: "order_open_all", task: TaskSelector{Order: ptr(1.0), All: true}, wantTaskID: "task_open", wantTaskName: "Open task"},
+		{name: "id_done_all", task: TaskSelector{PageID: ptr("task_done"), All: true}, wantTaskID: "task_done", wantTaskName: "Done task"},
+		// Gone tasks never match, even with All
 		{name: "id_gone", task: TaskSelector{PageID: ptr("task_gone")}, wantFail: true},
 		{name: "order_gone", task: TaskSelector{Order: ptr(3.0)}, wantFail: true},
+		{name: "order_gone_all", task: TaskSelector{Order: ptr(3.0), All: true}, wantFail: true},
 		{name: "id_unknown", task: TaskSelector{PageID: ptr("task_unknown")}, wantFail: true},
 		{name: "order_unknown", task: TaskSelector{Order: ptr(9.0)}, wantFail: true},
 		{name: "order_ambiguous", task: TaskSelector{Order: ptr(4.0)}, wantFail: true, wantCandidates: []string{"task_dup_a", "task_dup_b"}},
+		// A done task sharing an open task's order only makes it ambiguous with All
+		{name: "order_shared_with_done", task: TaskSelector{Order: ptr(5.0)}, wantTaskID: "task_five", wantTaskName: "Five"},
+		{name: "order_shared_with_done_all", task: TaskSelector{Order: ptr(5.0), All: true}, wantFail: true, wantCandidates: []string{"task_five", "task_five_done"}},
 	}
 
 	for _, tc := range tests {
@@ -519,6 +529,7 @@ func TestSwitchTimer_Task(t *testing.T) {
 		{name: "id_open", task: TaskSelector{PageID: ptr("task_open")}, wantTaskID: "task_open"},
 		{name: "order_open", task: TaskSelector{Order: ptr(1.0)}, wantTaskID: "task_open"},
 		{name: "order_done", task: TaskSelector{Order: ptr(2.0)}, wantFail: true},
+		{name: "order_done_all", task: TaskSelector{Order: ptr(2.0), All: true}, wantTaskID: "task_done"},
 		{name: "id_unknown", task: TaskSelector{PageID: ptr("task_unknown")}, wantFail: true},
 		{name: "order_ambiguous", task: TaskSelector{Order: ptr(4.0)}, wantFail: true, wantCandidates: []string{"task_dup_a", "task_dup_b"}},
 	}

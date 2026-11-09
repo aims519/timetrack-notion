@@ -82,8 +82,8 @@ func newAttachCmd(a *app) *cobra.Command {
 			}
 
 			nowUTC := time.Now().UTC()
-			task := store.TaskSelector{Order: order, PageID: taskID}
-			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), task, all, nowUTC)
+			task := store.TaskSelector{Order: order, PageID: taskID, All: all}
+			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), task, nowUTC)
 
 			if err != nil {
 				return handleTaskErrors(err, shortIDMap, selector, entryIDPrefix)

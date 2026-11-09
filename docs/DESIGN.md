@@ -64,7 +64,7 @@ Global flags: `--output table|json` (default `table`), `--no-input` (never promp
 
 | Command | Behaviour |
 |---|---|
-| `tt start [description] [-t, --task SELECTOR \| --pick] [--switch] [--at TIME \| --ago DURATION]` | Needs a description, a task, or both. Fails with `timer_running` if a timer is running, unless `--switch`, which stops it and starts the new one at the same instant in one transaction (with `--at`/`--ago`, that instant must be after the old entry's start). The start time is captured before any lookup or picker, so time spent choosing isn't lost; the task is resolved before the transaction, so a failed lookup or cancelled picker leaves the old timer running. |
+| `tt start [description] [-t, --task SELECTOR \| --pick] [--all] [--switch] [--at TIME \| --ago DURATION]` | Needs a description, a task, or both. `--all` adds done tasks to order numbers and the picker. Fails with `timer_running` if a timer is running, unless `--switch`, which stops it and starts the new one at the same instant in one transaction (with `--at`/`--ago`, that instant must be after the old entry's start). The start time is captured before any lookup or picker, so time spent choosing isn't lost; the task is resolved before the transaction, so a failed lookup or cancelled picker leaves the old timer running. |
 | `tt stop [--at TIME \| --ago DURATION]` | Stops the running timer. Prints the closed entry. |
 | `tt status` | Running entry, elapsed time, today's total, and pending / blocked / waiting counts. Warns if the timer has run over 12 hours, and says so if the context isn't connected. Always exits 0. |
 

@@ -510,3 +510,87 @@ func TestRun_Start_AmbiguousOrder_ReturnsTaskItems(t *testing.T) {
 		t.Errorf("start after the failed start = %d, want 0 (stderr: %q)", code, stderr)
 	}
 }
+
+// --all adds done tasks to order numbers, so start can select one; without it the done task's
+// order is not_found. IDs match done tasks either way (§3.1)
+func TestRun_Start_All(t *testing.T) {
+	const (
+		openID = "8888888888888888888888888a111111"
+		doneID = "8888888888888888888888888b222222"
+	)
+
+	tests := []struct {
+		name        string
+		running     bool // start a plain timer first
+		args        []string
+		wantTaskID  string // empty when the start should fail with not_found
+		wantStopped bool
+	}{
+		{name: "done_order_without_all", args: []string{"start", "-t", "2"}},
+		{name: "done_order_with_all", args: []string{"start", "-t", "2", "--all"}, wantTaskID: doneID},
+		{name: "open_order_with_all", args: []string{"start", "-t", "1", "--all"}, wantTaskID: openID},
+		{name: "done_short_id_without_all", args: []string{"start", "-t", "222222"}, wantTaskID: doneID},
+		{name: "switch_done_order_without_all", running: true, args: []string{"start", "--switch", "-t", "2"}},
+		{name: "switch_done_order_with_all", running: true, args: []string{"start", "--switch", "-t", "2", "--all"}, wantTaskID: doneID, wantStopped: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			t.Setenv("TT_DB", dbPath)
+			t.Setenv("TT_TIMEZONE", "UTC")
+
+			edited := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
+			onStore(t, dbPath, func(st *store.Store) {
+				tasks := []store.Task{
+					{ContextID: store.DefaultContextID, PageID: openID, Name: "Open", SortOrder: ptr(1.0), LastEditedTime: edited},
+					{ContextID: store.DefaultContextID, PageID: doneID, Name: "Done", SortOrder: ptr(2.0), Done: true, LastEditedTime: edited},
+				}
+				if _, err := st.RefreshTasks(t.Context(), tasks, edited, true); err != nil {
+					t.Fatalf("RefreshTasks(): %v", err)
+				}
+			})
+
+			if tc.running {
+				code, _, stderr := runTT(t, "start", "organising calendar", "--at", "2026-01-01T09:00:00Z")
+				if code != 0 {
+					t.Fatalf("first start = %d, want 0 (stderr: %q)", code, stderr)
+				}
+			}
+
+			code, stdout, stderr := runTT(t, tc.args...)
+
+			if tc.wantTaskID == "" {
+				if code != 3 {
+					t.Fatalf("Run(%v) = %d, want 3 (stdout: %q, stderr: %q)", tc.args, code, stdout, stderr)
+				}
+				var got struct {
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(stderr, &got); err != nil {
+					t.Fatalf("unable to decode start error %q: %v", stderr, err)
+				}
+				if got.Error.Code != string(clierr.NotFound) {
+					t.Errorf("error.code want %q, got %q", clierr.NotFound, got.Error.Code)
+				}
+				return
+			}
+
+			if code != 0 {
+				t.Fatalf("Run(%v) = %d, want 0 (stderr: %q)", tc.args, code, stderr)
+			}
+			var got startTaskOutput
+			if err := json.Unmarshal(stdout, &got); err != nil {
+				t.Fatalf("unable to decode start output %q: %v", stdout, err)
+			}
+			if got.Entry.Task == nil || got.Entry.Task.PageID != tc.wantTaskID {
+				t.Errorf("entry.task.page_id want %q, got %+v", tc.wantTaskID, got.Entry.Task)
+			}
+			if (got.Stopped != nil) != tc.wantStopped {
+				t.Errorf("stopped = %+v, want stopped %t", got.Stopped, tc.wantStopped)
+			}
+		})
+	}
+}

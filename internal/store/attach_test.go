@@ -198,7 +198,7 @@ func TestAttachTaskToEntry_ResolvesEntry(t *testing.T) {
 			insertAttachEntries(t, st, tc.entries)
 			before := readStoredEntries(t, st)
 
-			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open")}, false, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open"), All: false}, attachNow)
 			if err != nil {
 				t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
 			}
@@ -262,7 +262,7 @@ func TestAttachTaskToEntry_EntryErrors(t *testing.T) {
 			insertAttachEntries(t, st, tc.entries)
 			before := readStoredEntries(t, st)
 
-			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open")}, false, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open"), All: false}, attachNow)
 
 			details := checkAttachError(t, err, tc.wantCode)
 			if got.ID != "" {
@@ -344,7 +344,7 @@ func TestAttachTaskToEntry_AmbiguousEntryPrefix(t *testing.T) {
 			insertAttachEntries(t, st, tc.entries)
 			before := readStoredEntries(t, st)
 
-			_, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open")}, false, attachNow)
+			_, err := st.AttachTaskToEntry(t.Context(), tc.prefix, TaskSelector{PageID: ptr("task_open")}, attachNow)
 
 			// The store returns the matching entries; the CLI turns them into entry documents
 			var ambErr *AmbiguousEntryError
@@ -414,7 +414,7 @@ func TestAttachTaskToEntry_ResolvesTask(t *testing.T) {
 			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
 			before := readStoredEntries(t, st)
 
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: tc.order, PageID: tc.taskID}, tc.all, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: tc.order, PageID: tc.taskID, All: tc.all}, attachNow)
 
 			if tc.wantTaskID == "" {
 				checkTaskNotFound(t, err)
@@ -474,7 +474,7 @@ func TestAttachTaskToEntry_UpdatesEntry(t *testing.T) {
 				syncState:   tc.syncState,
 			}})
 
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{PageID: ptr("task_new")}, false, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{PageID: ptr("task_new")}, attachNow)
 			if err != nil {
 				t.Fatalf("AttachTaskToEntry() want nil error, got %v", err)
 			}
@@ -566,7 +566,7 @@ func TestAttachTaskToEntry_OrderNumbers(t *testing.T) {
 			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
 			before := readStoredEntries(t, st)
 
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: tc.order, PageID: tc.taskID}, tc.all, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: tc.order, PageID: tc.taskID, All: tc.all}, attachNow)
 
 			if tc.wantTaskID == "" {
 				if tc.wantCandidates != nil {
@@ -660,7 +660,7 @@ func TestAttachTaskToEntry_OrderNumbers_CandidateProjects(t *testing.T) {
 			insertListTasks(t, st, tasks)
 			insertAttachEntries(t, st, []attachEntry{{id: entryB, start: "2026-10-19T09:00:00.000000000Z"}})
 
-			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: ptr(tc.order)}, false, attachNow)
+			got, err := st.AttachTaskToEntry(t.Context(), "", TaskSelector{Order: ptr(tc.order)}, attachNow)
 
 			if tc.wantTaskID != "" {
 				if err != nil {

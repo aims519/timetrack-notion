@@ -26,7 +26,7 @@ func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, task Task
 
 	var taskPageID *string
 	if task.hasValue() {
-		pageID, err := lookupTask(ctx, tx, task, false, s.dbPath)
+		pageID, err := lookupTask(ctx, tx, task, s.dbPath)
 		if err != nil {
 			return Entry{}, err
 		}
@@ -70,7 +70,7 @@ func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, task TaskSe
 	// If the user passed a task selector, resolve to a pageID here
 	var taskPageID *string
 	if task.hasValue() {
-		pageID, err := lookupTask(ctx, tx, task, false, s.dbPath)
+		pageID, err := lookupTask(ctx, tx, task, s.dbPath)
 		if err != nil {
 			return Entry{}, nil, err
 		}

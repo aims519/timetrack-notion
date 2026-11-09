@@ -41,12 +41,8 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			startUTC, err := validateStartFlags(sa, time.Now(), loc)
-			if err != nil {
-				return err
-			}
-
-			err = rejectUnimplemented(sa)
+			canPrompt := a.canPrompt(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			startUTC, err := validateStartFlags(sa, time.Now(), loc, canPrompt)
 			if err != nil {
 				return err
 			}
@@ -56,7 +52,25 @@ func newStartCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			startDoc, err := executeStartUpdates(cmd.Context(), a, sa, startUTC, shortIDMap)
+			var taskPageID *string
+			if sa.pickTask {
+				selectedPageID, err := runPickerForm(cmd.Context(), a.db, sa.allTasks, shortIDMap, cmd.InOrStdin(), cmd.ErrOrStderr(), "start")
+				if err != nil {
+					return err
+				}
+				taskPageID = &selectedPageID
+			} else {
+				selector, err := buildTaskSelector(sa.taskSelector, sa.allTasks, shortIDMap)
+				if err != nil {
+					return err
+				}
+				taskPageID, err = a.db.ResolveTask(cmd.Context(), selector)
+				if err != nil {
+					return handleTaskErrors(err, shortIDMap, sa.taskSelector, "")
+				}
+			}
+
+			startDoc, err := executeStartUpdates(cmd.Context(), a, sa, startUTC, shortIDMap, taskPageID)
 			if err != nil {
 				return err
 			}
@@ -77,7 +91,7 @@ func newStartCmd(a *app) *cobra.Command {
 
 // validateStartFlags checks for invalid combinations of flags, required flags that are missing,
 // or flags with malformed values. Returns the requested start time of the entry.
-func validateStartFlags(s startArgs, now time.Time, loc *time.Location) (time.Time, error) {
+func validateStartFlags(s startArgs, now time.Time, loc *time.Location, canPrompt bool) (time.Time, error) {
 	if s.ago != "" && s.at != "" {
 		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "only one of --ago or --at values are accepted"}
 	}
@@ -86,12 +100,16 @@ func validateStartFlags(s startArgs, now time.Time, loc *time.Location) (time.Ti
 		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "at least one of [description] or --task/--pick must be provided"}
 	}
 
-	if s.description != nil && *s.description == "" {
-		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "[description] must not be empty if provided"}
-	}
-
 	if s.taskSelector != "" && s.pickTask {
 		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "either --task or --pick can be set, not both"}
+	}
+
+	if s.pickTask && !canPrompt {
+		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "--pick is not allowed when prompts are disabled (no terminal or --no-input)"}
+	}
+
+	if s.description != nil && *s.description == "" {
+		return time.Time{}, &clierr.Error{Code: clierr.Usage, Message: "[description] must not be empty if provided"}
 	}
 
 	if s.ago != "" {
@@ -105,37 +123,32 @@ func validateStartFlags(s startArgs, now time.Time, loc *time.Location) (time.Ti
 	return now, nil
 }
 
-// rejectUnimplemented is a temporary measure until all start flags are implemented
-func rejectUnimplemented(sa startArgs) error {
-	if sa.pickTask {
-		return &clierr.Error{Code: clierr.Usage, Message: "--pick is not supported yet"}
-	}
-
-	return nil
-}
-
-func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string) (output.StartDoc, error) {
-	task := store.TaskSelector{All: s.allTasks}
-	if s.taskSelector != "" {
-		order, pageID, found := resolveTaskLookupID(s.taskSelector, shortIDMap)
+func buildTaskSelector(selector string, all bool, shortIDMap map[string]string) (store.TaskSelector, error) {
+	task := store.TaskSelector{All: all}
+	if selector != "" {
+		order, pageID, found := resolveTaskLookupID(selector, shortIDMap)
 		if !found {
-			return output.StartDoc{}, &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", s.taskSelector), Details: map[string]any{"selector": s.taskSelector}}
+			return store.TaskSelector{}, &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", selector), Details: map[string]any{"selector": selector}}
 		}
 		task.Order = order
 		task.PageID = pageID
 	}
 
+	return task, nil
+}
+
+func executeStartUpdates(ctx context.Context, a *app, s startArgs, startUTC time.Time, shortIDMap map[string]string, taskPageID *string) (output.StartDoc, error) {
 	if s.switchTask {
-		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, task, s.description)
+		startedEntry, stoppedEntry, err := a.db.SwitchTimer(ctx, startUTC, taskPageID, s.description)
 		if err != nil {
-			return output.StartDoc{}, handleTaskErrors(err, shortIDMap, s.taskSelector, "")
+			return output.StartDoc{}, err
 		}
 
 		return output.NewStartDoc(mapDBEntry(startedEntry, shortIDMap),
 			mapNullableDBEntry(stoppedEntry, shortIDMap), nil), nil
 	}
 
-	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, task, s.description)
+	dbEntry, err := a.db.StartNewTimer(ctx, startUTC, taskPageID, s.description)
 	if err != nil {
 		return output.StartDoc{}, handleTaskErrors(err, shortIDMap, s.taskSelector, "")
 	}

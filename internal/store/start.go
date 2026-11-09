@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, task TaskSelector, description *string) (Entry, error) {
+func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, taskPageID, description *string) (Entry, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
 		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
@@ -22,15 +22,6 @@ func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, task Task
 	}
 	if found {
 		return Entry{}, &clierr.Error{Code: clierr.TimerRunning, Message: "timer already running", Details: map[string]any{"entry": runningEntryID.String()}}
-	}
-
-	var taskPageID *string
-	if task.hasValue() {
-		pageID, err := lookupTask(ctx, tx, task, s.dbPath)
-		if err != nil {
-			return Entry{}, err
-		}
-		taskPageID = &pageID
 	}
 
 	// create new entry
@@ -53,7 +44,7 @@ func (s *Store) StartNewTimer(ctx context.Context, startUTC time.Time, task Task
 	return entry, nil
 }
 
-func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, task TaskSelector, description *string) (started Entry, stopped *Entry, err error) {
+func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, taskPageID, description *string) (started Entry, stopped *Entry, err error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
 		return Entry{}, nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
@@ -65,16 +56,6 @@ func (s *Store) SwitchTimer(ctx context.Context, startUTC time.Time, task TaskSe
 	stoppedID, err := tryStopRunningEntry(ctx, tx, startUTC, now, s.dbPath)
 	if err != nil {
 		return Entry{}, nil, err
-	}
-
-	// If the user passed a task selector, resolve to a pageID here
-	var taskPageID *string
-	if task.hasValue() {
-		pageID, err := lookupTask(ctx, tx, task, s.dbPath)
-		if err != nil {
-			return Entry{}, nil, err
-		}
-		taskPageID = &pageID
 	}
 
 	// Create new entry

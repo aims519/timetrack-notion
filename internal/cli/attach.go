@@ -1,9 +1,7 @@
 package cli
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -12,8 +10,6 @@ import (
 	"github.com/aims519/timetrack-notion/internal/output"
 	"github.com/aims519/timetrack-notion/internal/store"
 	"github.com/aims519/timetrack-notion/internal/timeparse"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 )
 
@@ -29,33 +25,20 @@ func newAttachCmd(a *app) *cobra.Command {
 				return &clierr.Error{Code: clierr.Usage, Message: "[selector] argument is required when prompts are disabled (no terminal or --no-input)"}
 			}
 
-			// present task picker
+			// Database lookup (full ID, short ID, order)
+			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)
+			if err != nil {
+				return err
+			}
+
 			var selector string
 			if len(args) == 0 {
-				allTasks, err := taskListForPicker(cmd.Context(), a.db, all)
+				// present task picker
+				pickedTaskPageID, err := runPickerForm(cmd.Context(), a.db, all, shortIDMap, cmd.InOrStdin(), cmd.ErrOrStderr(), "attach")
 				if err != nil {
 					return err
 				}
-
-				if len(allTasks) == 0 {
-					message := "no tasks available to attach, try running 'tt task refresh'"
-					if !all {
-						message += ". Or use --all in 'tt attach' to include completed tasks"
-					}
-					return &clierr.Error{Code: clierr.NotFound, Message: message}
-				}
-
-				pickerForm := taskPickerForm(allTasks, &selector).
-					WithInput(cmd.InOrStdin()).
-					WithOutput(cmd.ErrOrStderr())
-
-				err = pickerForm.RunWithContext(cmd.Context())
-				if errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
-					return &clierr.Error{Code: clierr.Cancelled, Message: "task picker cancelled", Cause: err}
-				}
-				if err != nil {
-					return &clierr.Error{Code: clierr.Internal, Message: "error running task picker form", Cause: err}
-				}
+				selector = pickedTaskPageID
 			} else if len(args) == 1 {
 				selector = args[0]
 			} else {
@@ -70,20 +53,17 @@ func newAttachCmd(a *app) *cobra.Command {
 				return &clierr.Error{Code: clierr.Usage, Message: "--entry ID cannot be empty and must be at least 7 characters long"}
 			}
 
-			// Database lookup (full ID, short ID, order)
-			shortIDMap, err := buildShortIDMap(cmd.Context(), a.db)
+			taskSelector, err := buildTaskSelector(selector, all, shortIDMap)
 			if err != nil {
 				return err
 			}
-
-			order, taskID, found := resolveTaskLookupID(selector, shortIDMap)
-			if !found {
-				return &clierr.Error{Code: clierr.NotFound, Message: fmt.Sprintf("unable to find matching task for selector, %q", selector), Details: map[string]any{"selector": selector}}
+			taskPageID, err := a.db.ResolveTask(cmd.Context(), taskSelector)
+			if err != nil {
+				return handleTaskErrors(err, shortIDMap, selector, entryIDPrefix)
 			}
 
 			nowUTC := time.Now().UTC()
-			task := store.TaskSelector{Order: order, PageID: taskID, All: all}
-			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), task, nowUTC)
+			entry, err := a.db.AttachTaskToEntry(cmd.Context(), strings.ToLower(entryIDPrefix), *taskPageID, nowUTC)
 
 			if err != nil {
 				return handleTaskErrors(err, shortIDMap, selector, entryIDPrefix)
@@ -135,70 +115,6 @@ func resolveTaskLookupID(selector string, shortIDMap map[string]string) (order *
 	}
 
 	return nil, nil, false
-}
-
-// taskPickerForm returns a picker form that is triggered if the user
-// doesn't pass in a selector argument to the attach command
-func taskPickerForm(tasks []output.TaskItem, targetTaskID *string) *huh.Form {
-	var taskOptions []huh.Option[string]
-
-	longestOrder := 0
-	longestShortID := 0
-	for _, t := range tasks {
-		if t.Order != nil {
-			if orderLen := len(strconv.FormatFloat(*t.Order, 'f', -1, 64)); orderLen > longestOrder {
-				longestOrder = orderLen
-			}
-		}
-
-		if shortIDLen := len(t.ShortID); shortIDLen > longestShortID {
-			longestShortID = shortIDLen
-		}
-	}
-
-	for _, t := range tasks {
-		var orderStr string
-		if t.Order != nil {
-			orderStr = strconv.FormatFloat(*t.Order, 'f', -1, 64)
-		} else {
-			orderStr = "-"
-		}
-
-		label := fmt.Sprintf("%-*s  %-*s  %s", longestOrder, orderStr, longestShortID, t.ShortID, t.Name)
-		option := huh.NewOption(label, t.PageID)
-		taskOptions = append(taskOptions, option)
-	}
-
-	keyMap := huh.NewDefaultKeyMap()
-	keyMap.Quit = key.NewBinding(key.WithKeys("esc", "ctrl+c"))
-
-	return huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Choose a task to attach. Esc to cancel").
-				Options(taskOptions...).
-				Value(targetTaskID),
-		),
-	).WithKeyMap(keyMap)
-}
-
-// taskListForPicker retrieves the list of available tasks to be passed to the picker form
-func taskListForPicker(ctx context.Context, s *store.Store, all bool) ([]output.TaskItem, error) {
-	// Fetch all tasks
-	tasks, _, err := s.ListTasks(ctx, store.NoLimit, all, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// Fetch short ID mappings for all tasks
-	shortIDMap, err := buildShortIDMap(ctx, s)
-	if err != nil {
-		return nil, err
-	}
-
-	doc := mapDbTasks(tasks, shortIDMap, false, nil)
-
-	return doc.Tasks, nil
 }
 
 // handleTaskErrors takes errors returned from commands that attach tasks to entries, and provides the appropriate context

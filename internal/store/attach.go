@@ -10,19 +10,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// AttachTaskToEntry attempts to attach a task to an entry, using selectors provided by the user
-func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, task TaskSelector, nowUTC time.Time) (Entry, error) {
+// AttachTaskToEntry attaches a task to an entry using the provided taskPageID
+func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, taskPageID string, nowUTC time.Time) (Entry, error) {
 	tx, err := s.connectionPool.BeginTx(ctx, nil)
 	if err != nil {
 		return Entry{}, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	// Lookup task
-	foundTaskID, err := lookupTask(ctx, tx, task, s.dbPath)
-	if err != nil {
-		return Entry{}, err
-	}
 
 	// Lookup entry
 	entryID, err := resolveEntry(ctx, tx, entryPrefix, s.dbPath)
@@ -31,7 +25,7 @@ func (s *Store) AttachTaskToEntry(ctx context.Context, entryPrefix string, task 
 	}
 
 	// Execute task attach in DB
-	err = updateEntryWithTask(ctx, tx, foundTaskID, DefaultContextID, s.dbPath, entryID, nowUTC)
+	err = updateEntryWithTask(ctx, tx, taskPageID, DefaultContextID, s.dbPath, entryID, nowUTC)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -260,4 +254,30 @@ type TaskSelector struct {
 // or pageID is not nil
 func (ts TaskSelector) hasValue() bool {
 	return ts.Order != nil || ts.PageID != nil
+}
+
+// ResolveTask attempts to retrieve a task pageID that matches the user's provided
+// selector. Should be called prior to any write/update queries for store entries where an optional
+// task pageID is required
+func (s *Store) ResolveTask(ctx context.Context, selector TaskSelector) (*string, error) {
+	if !selector.hasValue() {
+		return nil, nil
+	}
+	tx, err := s.connectionPool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "can't begin transaction", Cause: err, Details: map[string]any{"path": s.dbPath}}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	foundTaskID, err := lookupTask(ctx, tx, selector, s.dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.Internal, Message: "error committing transaction", Cause: err}
+	}
+
+	return &foundTaskID, nil
 }

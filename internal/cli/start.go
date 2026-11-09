@@ -165,7 +165,10 @@ func resolveStartTaskPageID(ctx context.Context, s *store.Store, args startArgs,
 		}
 
 		selectedPageID, err := runPickerForm(ctx, allTasks, stdIn, stdErr)
-		return &selectedPageID, err
+		if err != nil {
+			return nil, err
+		}
+		return &selectedPageID, nil
 	}
 
 	selector, err := buildTaskSelector(args.taskSelector, args.allTasks, shortIDMap)

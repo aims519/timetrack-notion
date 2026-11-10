@@ -36,13 +36,13 @@ func NewClient(baseURL, apiToken string, httpClient *http.Client) *Client {
 }
 
 func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string, since *time.Time) ([]Page, error) {
-	url := fmt.Sprintf("%s/data_sources/%s/query", c.baseURL, dataSourceID)
+	path := fmt.Sprintf("/data_sources/%s/query", dataSourceID)
 	var pageResults []Page
 	var nextCursor string
 	moreResultsAvailable := true
 
 	for moreResultsAvailable {
-		pages, cursor, hasMore, err := dataSourcePageRequest(ctx, url, nextCursor, c.apiVersion, c.apiToken, c.httpClient, since)
+		pages, cursor, hasMore, err := c.dataSourcePageRequest(ctx, path, nextCursor, since)
 		if err != nil {
 			return nil, err
 		}
@@ -88,7 +88,7 @@ func handleErrorResponse(res *http.Response, b []byte) error {
 	return &clierr.Error{Code: clierr.Internal, Message: "unknown Notion error"}
 }
 
-func dataSourcePageRequest(ctx context.Context, url, startCursor, apiVersion, apiToken string, client *http.Client, since *time.Time) (pages []Page, nextCursor string, hasMore bool, err error) {
+func (c *Client) dataSourcePageRequest(ctx context.Context, path, startCursor string, since *time.Time) (pages []Page, nextCursor string, hasMore bool, err error) {
 	type lastEditedTime struct {
 		OnOrAfter string `json:"on_or_after"`
 	}
@@ -115,32 +115,9 @@ func dataSourcePageRequest(ctx context.Context, url, startCursor, apiVersion, ap
 	}
 
 	payload := bytes.NewReader(b)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
-	if err != nil {
-		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
-	}
-	addDefaultHeaders(req, apiVersion, apiToken)
-
-	res, err := client.Do(req)
-	if err != nil {
-		return []Page{}, "", false, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
-	}
-	defer res.Body.Close()
-
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
-	}
-
-	err = handleErrorResponse(res, bytes)
-	if err != nil {
-		return []Page{}, "", false, err
-	}
-
 	var qr queryResult
-	err = json.Unmarshal(bytes, &qr)
-	if err != nil {
-		return []Page{}, "", false, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	if err := c.do(ctx, http.MethodPost, path, payload, &qr); err != nil {
+		return []Page{}, "", false, err
 	}
 
 	return qr.Results, qr.NextCursor, qr.HasMore, nil
@@ -159,34 +136,10 @@ func (c *Client) LookupDataSourceID(ctx context.Context, databaseID string) (*st
 		DataSources []dataSource `json:"data_sources"`
 	}
 
-	url := fmt.Sprintf("%s/databases/%s", c.baseURL, databaseID)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
-	}
-	addDefaultHeaders(req, c.apiVersion, c.apiToken)
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
-	}
-	defer res.Body.Close()
-
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
-	}
-
-	err = handleErrorResponse(res, bytes)
-	if err != nil {
-		return nil, err
-	}
-
+	path := fmt.Sprintf("/databases/%s", databaseID)
 	var dbResult database
-	err = json.Unmarshal(bytes, &dbResult)
-	if err != nil {
-		return nil, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	if err := c.do(ctx, http.MethodGet, path, nil, &dbResult); err != nil {
+		return nil, err
 	}
 
 	if len(dbResult.DataSources) == 0 {
@@ -210,42 +163,17 @@ func (c *Client) LookupDataSourceID(ctx context.Context, databaseID string) (*st
 }
 
 func (c *Client) GetDataSource(ctx context.Context, dataSourceID string) (DataSource, error) {
-	url := fmt.Sprintf("%s/data_sources/%s", c.baseURL, dataSourceID)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return DataSource{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
-	}
-	addDefaultHeaders(req, c.apiVersion, c.apiToken)
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return DataSource{}, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
-	}
-	defer res.Body.Close()
-
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return DataSource{}, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
-	}
-
-	err = handleErrorResponse(res, bytes)
-	if err != nil {
-		return DataSource{}, err
-	}
+	path := fmt.Sprintf("/data_sources/%s", dataSourceID)
 
 	var dsResult DataSource
-	err = json.Unmarshal(bytes, &dsResult)
-	if err != nil {
-		return DataSource{}, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	if err := c.do(ctx, http.MethodGet, path, nil, &dsResult); err != nil {
+		return DataSource{}, err
 	}
 
 	return dsResult, nil
 }
 
 func (c *Client) CreateDatabase(ctx context.Context, parentPageID string, tasksDataSourceID string) (dataSourceID string, err error) {
-	url := fmt.Sprintf("%s/databases", c.baseURL)
-
 	requestJSON := fmt.Sprintf(`
 	{
 		"parent": {
@@ -323,27 +251,6 @@ func (c *Client) CreateDatabase(ctx context.Context, parentPageID string, tasksD
 	}`, parentPageID, tasksDataSourceID)
 
 	payload := strings.NewReader(requestJSON)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
-	if err != nil {
-		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
-	}
-	addDefaultHeaders(req, c.apiVersion, c.apiToken)
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
-	}
-	defer res.Body.Close()
-
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
-	}
-
-	err = handleErrorResponse(res, bytes)
-	if err != nil {
-		return "", err
-	}
 
 	type dataSource struct {
 		ID   string `json:"id"`
@@ -356,14 +263,53 @@ func (c *Client) CreateDatabase(ctx context.Context, parentPageID string, tasksD
 	}
 
 	var resObj response
-	err = json.Unmarshal(bytes, &resObj)
-	if err != nil {
-		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion create database response", Cause: err}
+	if err := c.do(ctx, http.MethodPost, "/databases", payload, &resObj); err != nil {
+		return "", err
 	}
 
 	if len(resObj.DataSources) != 1 {
-		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion create database response: unexpected data source count", Cause: err}
+		return "", &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion create database response: unexpected data source count"}
 	}
 
 	return resObj.DataSources[0].ID, nil
+}
+
+// do builds an HTTP request and sends to Notion. Unmarshals the response body
+// to v if a non-nil pointer was provided
+func (c *Client) do(ctx context.Context, method, path string, body io.Reader, v any) error {
+	url := fmt.Sprintf("%s%s", c.baseURL, path)
+
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+	addDefaultHeaders(req, c.apiVersion, c.apiToken)
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
+	}
+	defer res.Body.Close()
+
+	respBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+	}
+
+	err = handleErrorResponse(res, respBody)
+	if err != nil {
+		return err
+	}
+
+	// no need to unmarshal if no pointer provided
+	if v == nil {
+		return nil
+	}
+
+	err = json.Unmarshal(respBody, v)
+	if err != nil {
+		return &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	}
+
+	return nil
 }

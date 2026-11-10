@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -32,38 +31,14 @@ func relationItems(id string) []any {
 // - Start and End times are truncated to the minute and sent in UTC
 // - Does not check for an existing page before sending the request, as this is handled elsewhere
 func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (Page, error) {
-	url := fmt.Sprintf("%s/pages", c.baseURL)
-
 	payload, err := entryPagePayload(dataSourceID, title, description, localID, taskPageID, start, end)
-	if err != nil {
-		return Page{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
-	}
-	addDefaultHeaders(req, c.apiVersion, c.apiToken)
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
-	}
-	defer res.Body.Close()
-
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
-	}
-
-	err = handleErrorResponse(res, bytes)
 	if err != nil {
 		return Page{}, err
 	}
 
 	var p Page
-	err = json.Unmarshal(bytes, &p)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	if err := c.do(ctx, http.MethodPost, "/pages", payload, &p); err != nil {
+		return Page{}, err
 	}
 
 	return p, nil
@@ -72,8 +47,6 @@ func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, descr
 // FindEntryPage checks whether a page has already been created for an entry, by
 // querying a datasource and filtering by its localID. If found, the page object is returned with a true result
 func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (Page, bool, error) {
-	url := fmt.Sprintf("%s/data_sources/%s/query", c.baseURL, entriesDataSourceID)
-
 	body := obj{
 		"page_size": 1,
 		"filter": obj{
@@ -89,32 +62,10 @@ func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localID
 	}
 
 	payload := bytes.NewReader(b)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
-	if err != nil {
-		return Page{}, false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
-	}
-	addDefaultHeaders(req, c.apiVersion, c.apiToken)
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return Page{}, false, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
-	}
-	defer res.Body.Close()
-
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return Page{}, false, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
-	}
-
-	err = handleErrorResponse(res, bytes)
-	if err != nil {
-		return Page{}, false, err
-	}
-
+	path := fmt.Sprintf("/data_sources/%s/query", entriesDataSourceID)
 	var qr queryResult
-	err = json.Unmarshal(bytes, &qr)
-	if err != nil {
-		return Page{}, false, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	if err := c.do(ctx, http.MethodPost, path, payload, &qr); err != nil {
+		return Page{}, false, err
 	}
 
 	page := Page{}
@@ -129,39 +80,15 @@ func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localID
 
 // UpdateEntryPage sends a PATCH request to Notion to update a Page in the Time entries data source
 func (c *Client) UpdateEntryPage(ctx context.Context, pageID, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (Page, error) {
-	url := fmt.Sprintf("%s/pages/%s", c.baseURL, pageID)
-
 	payload, err := entryPagePayload(dataSourceID, title, description, localID, taskPageID, start, end)
 	if err != nil {
 		return Page{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, payload)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
-	}
-	addDefaultHeaders(req, c.apiVersion, c.apiToken)
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
-	}
-	defer res.Body.Close()
-
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
-	}
-
-	err = handleErrorResponse(res, bytes)
-	if err != nil {
-		return Page{}, err
-	}
-
 	var p Page
-	err = json.Unmarshal(bytes, &p)
-	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	path := fmt.Sprintf("/pages/%s", pageID)
+	if err := c.do(ctx, http.MethodPatch, path, payload, &p); err != nil {
+		return Page{}, err
 	}
 
 	return p, nil

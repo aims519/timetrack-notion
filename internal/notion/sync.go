@@ -119,3 +119,34 @@ func entryPagePayload(dataSourceID, title, description, localID, taskPageID stri
 
 	return bytes.NewReader(b), nil
 }
+
+// TrashEntryPage updates a Time entries row to trashed. If the page is already trashed,
+// Notion returns a 400 response
+func (c *Client) TrashEntryPage(ctx context.Context, pageID, dataSourceID string) (Page, error) {
+	b, err := json.Marshal(obj{
+		"in_trash": true,
+	})
+	if err != nil {
+		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+
+	var p Page
+	path := fmt.Sprintf("/pages/%s", pageID)
+	payload := bytes.NewReader(b)
+	if err := c.do(ctx, http.MethodPatch, path, payload, &p); err != nil {
+		return Page{}, err
+	}
+
+	return p, nil
+}
+
+// EntryPage returns a Time entries Page from Notion
+func (c *Client) EntryPage(ctx context.Context, pageID, dataSourceID string) (Page, error) {
+	var p Page
+	path := fmt.Sprintf("/pages/%s", pageID)
+	if err := c.do(ctx, http.MethodGet, path, nil, &p); err != nil {
+		return Page{}, err
+	}
+
+	return p, nil
+}

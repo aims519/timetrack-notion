@@ -3,6 +3,7 @@ package notion
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -985,6 +986,457 @@ func TestUpdateEntryPage_Unreachable_ReturnsOffline(t *testing.T) {
 
 	start := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
 	got, err := nc.UpdateEntryPage(t.Context(), "entry-page-1", "entries-ds", "title", "description", "local-1", "task-page", start, start.Add(time.Hour))
+	if err == nil {
+		t.Fatalf("expected an error, got page %q", got.ID)
+	}
+
+	var ce *clierr.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("error %v is not a *clierr.Error", err)
+	}
+
+	if ce.Code != clierr.Offline {
+		t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+	}
+
+	// The cause is printed with the error, so it must never carry the token (DESIGN.md §9)
+	if strings.Contains(err.Error(), token) || (ce.Cause != nil && strings.Contains(ce.Cause.Error(), token)) {
+		t.Errorf("error includes the token: %v", err)
+	}
+}
+
+func TestTrashEntryPage_ReturnsPage(t *testing.T) {
+	const want = "entry-page-1"
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseBody := `{
+			"object": "page",
+			"id": "entry-page-1",
+			"created_time": "2026-11-10T09:30:00.000Z",
+			"last_edited_time": "2026-11-10T10:15:00.000Z",
+			"in_trash": true
+		}`
+
+		if _, err := w.Write([]byte(responseBody)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, "test-token", s.Client())
+
+	got, err := nc.TrashEntryPage(t.Context(), want, "entries-ds")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got.ID != want {
+		t.Errorf("page ID = %q, want %q", got.ID, want)
+	}
+
+	if !got.InTrash {
+		t.Errorf("InTrash = false, want true")
+	}
+}
+
+// A tombstoned entry trashes its row (DESIGN.md §6.1) with a PATCH to the page that sends only
+// in_trash, so trashing never rewrites the row's properties
+func TestTrashEntryPage_RequestShape(t *testing.T) {
+	const (
+		pageID = "59833787-2cf9-4fdf-8782-e53db20768a5"
+		token  = "test-token"
+	)
+
+	wantPath := "/pages/" + pageID
+	wantHeaders := map[string]string{
+		"Authorization":  "Bearer " + token,
+		"Notion-Version": "2026-03-11",
+		"Content-Type":   "application/json",
+	}
+	wantBody := map[string]any{"in_trash": true}
+
+	var requests atomic.Int32
+	var body map[string]any
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+
+		if r.Method != http.MethodPatch {
+			t.Errorf("method = %q, want %q", r.Method, http.MethodPatch)
+		}
+
+		if r.URL.Path != wantPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, wantPath)
+		}
+
+		for name, want := range wantHeaders {
+			if got := r.Header.Get(name); got != want {
+				t.Errorf("header %s = %q, want %q", name, got, want)
+			}
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("request body is not valid JSON: %v", err)
+		}
+
+		if _, err := w.Write([]byte(`{"object": "page", "id": "` + pageID + `", "in_trash": true}`)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, token, s.Client())
+
+	if _, err := nc.TrashEntryPage(t.Context(), pageID, "entries-ds"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Errorf("unexpected request count. Got %d, want 1", got)
+	}
+
+	if !reflect.DeepEqual(body, wantBody) {
+		t.Errorf("request body = %v, want %v", body, wantBody)
+	}
+}
+
+func TestTrashEntryPage_ErrorResponse_ReturnsCLIError(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantCode clierr.ErrorCode
+	}{
+		{
+			name:     "bad request",
+			status:   http.StatusBadRequest,
+			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "body failed validation"}`,
+			wantCode: clierr.Usage,
+		},
+		{
+			// Notion answers trashing an already-trashed page with a 400 (DESIGN.md question 19). Treating
+			// that as success is the sync's job, after it retrieves the page, so the client just reports the 400
+			name:     "page is already trashed",
+			status:   http.StatusBadRequest,
+			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "Can't edit block that is archived. You must unarchive the block before editing."}`,
+			wantCode: clierr.Usage,
+		},
+		{
+			name:     "invalid token",
+			status:   http.StatusUnauthorized,
+			body:     `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`,
+			wantCode: clierr.AccessDenied,
+		},
+		{
+			// What Notion returns for a page that isn't shared with the integration, too
+			name:     "page not found",
+			status:   http.StatusNotFound,
+			body:     `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find page."}`,
+			wantCode: clierr.NotFound,
+		},
+		{
+			name:     "server error",
+			status:   http.StatusInternalServerError,
+			body:     `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`,
+			wantCode: clierr.Internal,
+		},
+		// Edge cases
+		{
+			name:     "unmapped status",
+			status:   http.StatusServiceUnavailable,
+			body:     `{"object": "error", "status": 503, "code": "service_unavailable", "message": "Notion is unavailable."}`,
+			wantCode: clierr.Internal,
+		},
+		{
+			name:     "error body is not JSON",
+			status:   http.StatusBadGateway,
+			body:     `<html><body>502 Bad Gateway</body></html>`,
+			wantCode: clierr.Internal,
+		},
+		{
+			// A 200 that can't be read must not look like a trashed page
+			name:     "success body is not JSON",
+			status:   http.StatusOK,
+			body:     `<html><body>not JSON</body></html>`,
+			wantCode: clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			got, err := nc.TrashEntryPage(t.Context(), "entry-page-1", "entries-ds")
+			if err == nil {
+				t.Fatalf("expected an error, got page %q", got.ID)
+			}
+
+			if got.ID != "" {
+				t.Errorf("expected no page alongside an error, got %q", got.ID)
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != tc.wantCode {
+				t.Errorf("error code = %q, want %q", ce.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// See TestUpdateEntryPage_Unreachable_ReturnsOffline
+func TestTrashEntryPage_Unreachable_ReturnsOffline(t *testing.T) {
+	const token = "secret-test-token"
+
+	// See TestQueryDataSource_Unreachable_ReturnsOffline for why this needs NewServer
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to a closed server: %s %s", r.Method, r.URL.Path)
+	}))
+	nc := NewClient(s.URL, token, s.Client())
+
+	s.Close()
+
+	got, err := nc.TrashEntryPage(t.Context(), "entry-page-1", "entries-ds")
+	if err == nil {
+		t.Fatalf("expected an error, got page %q", got.ID)
+	}
+
+	var ce *clierr.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("error %v is not a *clierr.Error", err)
+	}
+
+	if ce.Code != clierr.Offline {
+		t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+	}
+
+	// The cause is printed with the error, so it must never carry the token (DESIGN.md §9)
+	if strings.Contains(err.Error(), token) || (ce.Cause != nil && strings.Contains(ce.Cause.Error(), token)) {
+		t.Errorf("error includes the token: %v", err)
+	}
+}
+
+// After a 400 on an entry with a page ID, the sync retrieves the page and reads in_trash to decide
+// what the 400 meant (DESIGN.md §6.1, §6.3), so both values must come through
+func TestEntryPage_ReturnsPage(t *testing.T) {
+	tests := []struct {
+		name        string
+		inTrash     string
+		wantInTrash bool
+	}{
+		{name: "not trashed", inTrash: "false", wantInTrash: false},
+		{name: "trashed", inTrash: "true", wantInTrash: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const want = "entry-page-1"
+
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				responseBody := `{
+					"object": "page",
+					"id": "entry-page-1",
+					"created_time": "2026-11-10T09:30:00.000Z",
+					"last_edited_time": "2026-11-10T10:15:00.000Z",
+					"in_trash": ` + tc.inTrash + `,
+					"properties": {
+						"Title": {"id": "title", "type": "title", "title": [{"plain_text": "Writing more tests"}]}
+					}
+				}`
+
+				if _, err := w.Write([]byte(responseBody)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			got, err := nc.EntryPage(t.Context(), want, "entries-ds")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got.ID != want {
+				t.Errorf("page ID = %q, want %q", got.ID, want)
+			}
+
+			if got.InTrash != tc.wantInTrash {
+				t.Errorf("InTrash = %t, want %t", got.InTrash, tc.wantInTrash)
+			}
+		})
+	}
+}
+
+// Retrieving a page is a GET with no body, so it can't change the row it's checking
+func TestEntryPage_RequestShape(t *testing.T) {
+	const (
+		pageID = "59833787-2cf9-4fdf-8782-e53db20768a5"
+		token  = "test-token"
+	)
+
+	wantPath := "/pages/" + pageID
+	wantHeaders := map[string]string{
+		"Authorization":  "Bearer " + token,
+		"Notion-Version": "2026-03-11",
+	}
+
+	var requests atomic.Int32
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %q, want %q", r.Method, http.MethodGet)
+		}
+
+		if r.URL.Path != wantPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, wantPath)
+		}
+
+		for name, want := range wantHeaders {
+			if got := r.Header.Get(name); got != want {
+				t.Errorf("header %s = %q, want %q", name, got, want)
+			}
+		}
+
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		if len(b) != 0 {
+			t.Errorf("request body = %q, want none", b)
+		}
+
+		if _, err := w.Write([]byte(`{"object": "page", "id": "` + pageID + `", "in_trash": true}`)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, token, s.Client())
+
+	if _, err := nc.EntryPage(t.Context(), pageID, "entries-ds"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Errorf("unexpected request count. Got %d, want 1", got)
+	}
+}
+
+func TestEntryPage_ErrorResponse_ReturnsCLIError(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantCode clierr.ErrorCode
+	}{
+		{
+			name:     "bad request",
+			status:   http.StatusBadRequest,
+			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "path failed validation"}`,
+			wantCode: clierr.Usage,
+		},
+		{
+			name:     "invalid token",
+			status:   http.StatusUnauthorized,
+			body:     `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`,
+			wantCode: clierr.AccessDenied,
+		},
+		{
+			// A trashed page still answers 200 (DESIGN.md question 19), so a 404 means deleted for good
+			// or not shared with the integration
+			name:     "page not found",
+			status:   http.StatusNotFound,
+			body:     `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find page."}`,
+			wantCode: clierr.NotFound,
+		},
+		{
+			name:     "server error",
+			status:   http.StatusInternalServerError,
+			body:     `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`,
+			wantCode: clierr.Internal,
+		},
+		// Edge cases
+		{
+			name:     "unmapped status",
+			status:   http.StatusServiceUnavailable,
+			body:     `{"object": "error", "status": 503, "code": "service_unavailable", "message": "Notion is unavailable."}`,
+			wantCode: clierr.Internal,
+		},
+		{
+			name:     "error body is not JSON",
+			status:   http.StatusBadGateway,
+			body:     `<html><body>502 Bad Gateway</body></html>`,
+			wantCode: clierr.Internal,
+		},
+		{
+			// A 200 that can't be read must not look like a page that isn't trashed
+			name:     "success body is not JSON",
+			status:   http.StatusOK,
+			body:     `<html><body>not JSON</body></html>`,
+			wantCode: clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			got, err := nc.EntryPage(t.Context(), "entry-page-1", "entries-ds")
+			if err == nil {
+				t.Fatalf("expected an error, got page %q", got.ID)
+			}
+
+			if got.ID != "" {
+				t.Errorf("expected no page alongside an error, got %q", got.ID)
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != tc.wantCode {
+				t.Errorf("error code = %q, want %q", ce.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// See TestUpdateEntryPage_Unreachable_ReturnsOffline
+func TestEntryPage_Unreachable_ReturnsOffline(t *testing.T) {
+	const token = "secret-test-token"
+
+	// See TestQueryDataSource_Unreachable_ReturnsOffline for why this needs NewServer
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to a closed server: %s %s", r.Method, r.URL.Path)
+	}))
+	nc := NewClient(s.URL, token, s.Client())
+
+	s.Close()
+
+	got, err := nc.EntryPage(t.Context(), "entry-page-1", "entries-ds")
 	if err == nil {
 		t.Fatalf("expected an error, got page %q", got.ID)
 	}

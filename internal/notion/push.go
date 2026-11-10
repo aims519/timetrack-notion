@@ -1,94 +1,60 @@
 package notion
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
 
+// obj is a type alias for a map, used to construct
+// JSON requests
+type obj = map[string]any
+
+// textItems builds the array Notion expects for rich_text
+// and title properties
+func textItems(s string) []any {
+	return []any{obj{"text": obj{"content": s}}}
+}
+
+// relationItems builds the array Notion expects for a
+// relation property with a single relation
+func relationItems(id string) []any {
+	return []any{obj{"id": id}}
+}
+
 // CreateEntryPage attempts to add a time Entry Page in Notion, using the provided details
+// - Start and End times are truncated to the minute and sent in UTC
+// - Does not check for an existing page before sending the request, as this is handled elsewhere
 func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (Page, error) {
 	url := fmt.Sprintf("%s/pages", c.baseURL)
 
 	startTruncated := start.UTC().Truncate(time.Minute).Format(time.RFC3339)
 	endTruncated := end.UTC().Truncate(time.Minute).Format(time.RFC3339)
 
-	requestJSON := fmt.Sprintf(`
-	{	
-		"parent": {
-				"data_source_id": %s,
-				"type": "data_source_id"
+	body := obj{
+		"parent": obj{"type": "data_source_id", "data_source_id": dataSourceID},
+		"properties": obj{
+			"Title":       obj{"type": "title", "title": textItems(title)},
+			"Local ID":    obj{"type": "rich_text", "rich_text": textItems(localID)},
+			"Start":       obj{"type": "date", "date": obj{"start": startTruncated}},
+			"End":         obj{"type": "date", "date": obj{"start": endTruncated}},
+			"Description": obj{"type": "rich_text", "rich_text": textItems(description)},
+			"Task":        obj{"type": "relation", "relation": relationItems(taskPageID)},
 		},
-		"properties": {
-			"Title": {
-				"id": "title",
-				"type": "title",
-				"title": [
-					{
-						"text": {
-							"content": %s
-						}
-					}
-				]
-			},
-			"Local ID": {
-				"type": "rich_text",
-				"rich_text": [
-					{
-						"text": {
-							"content": %s
-						}
-					}
-				]
-			},
-			"Start": {
-				"type": "date",
-				"date": {
-					"start": %s
-				} 
-			},
-			"End": {
-				"type": "date",
-					"date": {
-					"start": %s
-				} 
-			},
-			"Description": {
-				"type": "rich_text",
-				"rich_text": [
-					{
-						"text": {
-							"content": %s
-						}
-					}
-				]
-			},
-			"Task": {
-				"type": "relation",
-				"relation": [
-					{
-						"id": %s
-					}
-				]
-			}
-		}
 	}
-	`,
-		jsonString(dataSourceID),
-		jsonString(title),
-		jsonString(localID),
-		jsonString(startTruncated),
-		jsonString(endTruncated),
-		jsonString(description),
-		jsonString(taskPageID))
 
-	payload := strings.NewReader(requestJSON)
+	b, err := json.Marshal(body)
+	if err != nil {
+		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+
+	payload := bytes.NewReader(b)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
 	if err != nil {
 		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
@@ -121,24 +87,25 @@ func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, descr
 }
 
 // FindEntryPage checks whether a page has already been created for an entry, by
-// querying a datasource and filtering by its localID. If found, the page object is returned
+// querying a datasource and filtering by its localID. If found, the page object is returned with a true result
 func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (Page, bool, error) {
 	url := fmt.Sprintf("%s/data_sources/%s/query", c.baseURL, entriesDataSourceID)
 
-	requestJSON := fmt.Sprintf(`
-	{
+	body := obj{
 		"page_size": 1,
-		"filter": {
-			"rich_text": {
-				"equals": %s
-			},
-			"property": %s,
-			"type": "rich_text"
-		}
+		"filter": obj{
+			"type":      "rich_text",
+			"property":  localIDKey,
+			"rich_text": obj{"equals": localIDValue},
+		},
 	}
-	`, jsonString(localIDValue), jsonString(localIDKey))
 
-	payload := strings.NewReader(requestJSON)
+	b, err := json.Marshal(body)
+	if err != nil {
+		return Page{}, false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+
+	payload := bytes.NewReader(b)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
 	if err != nil {
 		return Page{}, false, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
@@ -175,12 +142,4 @@ func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localID
 	}
 
 	return page, found, nil
-}
-
-// jsonString marshalls the given user input so that
-// it can be properly escaped in a JSON request body
-func jsonString(input string) string {
-	// error ignored since marshalling a string can't fail
-	b, _ := json.Marshal(input)
-	return string(b)
 }

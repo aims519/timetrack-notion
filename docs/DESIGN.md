@@ -262,7 +262,7 @@ Notion computes all totals; the tool never writes a duration, and never touches 
 
 ### 6.1 What is pushed
 
-Stopped entries with a task attached, even if that task is marked done in Notion. Running and unattached entries are held back (`waiting`). Tombstoned entries trash their row (`in_trash: true`); one with no stored page ID is looked up by `Local ID` first and simply dropped if no row exists. Trashing an already-trashed row counts as success (to confirm, question 19).
+Stopped entries with a task attached, even if that task is marked done in Notion. Running and unattached entries are held back (`waiting`). Tombstoned entries trash their row (`in_trash: true`); one with no stored page ID is looked up by `Local ID` first and simply dropped if no row exists. Trashing an already-trashed row counts as success, but Notion rejects it with a 400 (`validation_error`), so on a 400 the page is retrieved: trashed is success, otherwise `bad_request` (§6.3, question 19).
 
 `Start` and `End` are sent as UTC instants truncated to the minute, **never with `time_zone`**: Notion keeps the wall-clock digits and swaps in the named zone's offset, which changes the instant.
 
@@ -517,7 +517,7 @@ The Notion token comes only from `NOTION_TOKEN`. It is never a flag (shell histo
 - First run: timing before `init`, then `init` connecting with entries intact.
 - Drop mid-create (fake client creates the row, then fails): the next run finds it by `Local ID` and doesn't duplicate.
 - Minute truncation: 09:01:50 → 09:01:00; whole minutes unchanged; 31 s, 59 s, 90 s spans; 09:01:59 → 09:02:00 is 1 minute. The fake client rejects any payload with `time_zone`.
-- Trashed rows: a 400 on a trashed page is `row_missing`; `--retry-blocked` restores and updates in one request; trashing a trashed row succeeds.
+- Trashed rows: a 400 on a trashed page is `row_missing`; `--retry-blocked` restores and updates in one request; trashing a trashed row succeeds (the fake returns 400, then the retrieve shows `in_trash`).
 - `HH:MM` on both DST change days.
 - A second `tt sync` while one holds the lock exits 4 without reading entries.
 
@@ -532,7 +532,6 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **7.** What bumps `schema_version`, and whether to publish JSON schemas per command.
 - **8.** Short IDs are relative to the cache and may lengthen; scripts should store full page IDs.
 - **9.** Overlaps are allowed with a warning; rejecting them without `--force` would stop double counting at the cost of friction. Revisit after real use.
-- **19.** Probe still needed (on `2026-03-11`): trashing an already-trashed page, and retrieving a trashed page reporting `in_trash` (§6.1, §6.3).
 
 ### Resolved
 
@@ -546,6 +545,7 @@ Numbers are stable IDs (Notion task comments cite them). 10, 11 and 13 moved to 
 - **16.** The context lives in SQLite with the entries; no config file.
 - **17.** Query-after-create is consistent (40 creates, no misses or duplicates in the spike), so there's no post-sync duplicate check. Editing a trashed page returns 400; trashed pages don't appear in `Local ID` queries.
 - **18.** Network failures are counted per attempt; 3 in a row stop the run with entries left `pending` (exit 6); `failed` is only for persistent 429/5xx.
+- **19.** Trashing isn't idempotent in Notion: trashing an already-trashed page returns 400 `validation_error` ("Can't edit block that is archived"), while retrieving it returns 200 with `in_trash: true` (probed 10 Nov on `2026-03-11`). So a trash that gets a 400 retrieves the page, the same request an update makes on a 400 (§6.3): trashed is success, otherwise `bad_request` (§6.1). Rejected: matching the error message (`validation_error` covers many failures, and the wording isn't a contract), and retrieving before every trash (an extra request on every trash to handle the rare repeat).
 - **20.** The data directory follows XDG: `$XDG_DATA_HOME/tt` on any OS, else `%LOCALAPPDATA%\tt` on Windows (local, not roaming, because a database shouldn't sync between machines) and `~/.local/share/tt` elsewhere. It's always the directory holding the database, and each database gets its own lock file beside it, so two databases never share a lock. An empty `TT_DB` is an error, not a request for the default, and a `TT_DB` path's parent must already exist. Rejected: a visible `~/tt` (clutters the home directory) and `~/Library/Application Support` on macOS (awkward to type, and developer CLIs commonly use XDG there).
 - **21.** Migrations run with goose, so `schema_migrations` has goose's layout (§4) rather than `(version, applied_at)`, and files are numbered sequentially rather than by timestamp. Goose doesn't re-check the version inside each migration's transaction, so concurrent first runs are serialised with a lock file instead ([#9](https://github.com/aims519/timetrack-notion/issues/9)). Rejected: a hand-written runner (more code to own for no v1 gain) and idempotent migrations (goose would still record a version twice).
 - **22.** `init` takes database IDs, not data-source IDs, because a database ID is in the database's URL and easy to find, while a data-source ID is buried in Notion's settings. `init` resolves each to its data source, and `contexts` stores the data-source IDs (§4), since queries go through data sources (§10).

@@ -14,11 +14,11 @@ import (
 	"github.com/charmbracelet/huh"
 )
 
-// runPickerForm runs the task picker form and returns the task PageID selected
-func runPickerForm(ctx context.Context, s *store.Store, all bool, shortIDMap map[string]string, stdIn io.Reader, stdErr io.Writer, commandName string) (string, error) {
+// loadAllTasks reads all tasks from the local cache, for populating a task picker
+func loadAllTasks(ctx context.Context, s *store.Store, all bool, shortIDMap map[string]string, commandName string) ([]output.TaskItem, error) {
 	allTasks, err := taskListForPicker(ctx, s, all, shortIDMap)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	if len(allTasks) == 0 {
@@ -26,15 +26,20 @@ func runPickerForm(ctx context.Context, s *store.Store, all bool, shortIDMap map
 		if !all {
 			message += fmt.Sprintf(". Or use --all in 'tt %s' to include completed tasks", commandName)
 		}
-		return "", &clierr.Error{Code: clierr.NotFound, Message: message}
+		return nil, &clierr.Error{Code: clierr.NotFound, Message: message}
 	}
 
+	return allTasks, nil
+}
+
+// runPickerForm runs the task picker form and returns the task PageID selected
+func runPickerForm(ctx context.Context, tasks []output.TaskItem, stdIn io.Reader, stdErr io.Writer) (string, error) {
 	var selectedPageID string
-	pickerForm := taskPickerForm(allTasks, &selectedPageID).
+	pickerForm := taskPickerForm(tasks, &selectedPageID).
 		WithInput(stdIn).
 		WithOutput(stdErr)
 
-	err = pickerForm.RunWithContext(ctx)
+	err := pickerForm.RunWithContext(ctx)
 	if errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
 		return "", &clierr.Error{Code: clierr.Cancelled, Message: "task picker cancelled", Cause: err}
 	}

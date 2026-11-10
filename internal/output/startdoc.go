@@ -32,10 +32,24 @@ func (s StartDoc) WriteTable(w io.Writer, loc *time.Location) error {
 	}
 
 	startFormatted := s.Entry.Start.t.In(loc).Format(localTimeFormat)
-	_, err := fmt.Fprintf(w, "Started tracking \"%s\" at %s (%s)\n", formatEntryLabel(s.Entry), startFormatted, formatEntryShortID(s.Entry))
+	_, err := fmt.Fprint(w, taskStartedMessage(s.Entry, startFormatted))
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// taskStartedMessage returns a formatted string to describe a started Entry and/or attached Task
+func taskStartedMessage(e Entry, startTime string) string {
+	var startedMessage string
+	if e.Task != nil && e.Description != nil { // task attached with entry description
+		startedMessage = fmt.Sprintf("Started tracking \"%s\" on %s at %s (%s)\n", formatEntryLabel(e), formatTaskLabel(*e.Task), startTime, formatEntryShortID(e))
+	} else if e.Task != nil { // task but no description
+		startedMessage = fmt.Sprintf("Started tracking %s at %s (%s)\n", formatTaskLabel(*e.Task), startTime, formatEntryShortID(e))
+	} else { // no task
+		startedMessage = fmt.Sprintf("Started tracking \"%s\" at %s (%s)\n", formatEntryLabel(e), startTime, formatEntryShortID(e))
+	}
+
+	return startedMessage
 }

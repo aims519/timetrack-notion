@@ -89,3 +89,25 @@ func TestFormatMilliseconds(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatTaskLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		task TaskRef
+		want string
+	}{
+		{"with_short_id", TaskRef{PageID: "3f63b23e837922", ShortID: "837922", Name: "Write the sync engine"}, `"Write the sync engine" [task 837922]`},
+		// A task missing from the short ID map is still named
+		{"no_short_id", TaskRef{PageID: "3f63b23e837922", Name: "Write the sync engine"}, `"Write the sync engine"`},
+		// Names are quoted as they are, the same as descriptions
+		{"name_with_quotes", TaskRef{PageID: "3f63b23e837922", ShortID: "837922", Name: `say "hi"`}, `"say "hi"" [task 837922]`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatTaskLabel(tc.task); got != tc.want {
+				t.Errorf("formatTaskLabel(%+v) = %q, want %q", tc.task, got, tc.want)
+			}
+		})
+	}
+}

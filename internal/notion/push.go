@@ -34,27 +34,10 @@ func relationItems(id string) []any {
 func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (Page, error) {
 	url := fmt.Sprintf("%s/pages", c.baseURL)
 
-	startTruncated := start.UTC().Truncate(time.Minute).Format(time.RFC3339)
-	endTruncated := end.UTC().Truncate(time.Minute).Format(time.RFC3339)
-
-	body := obj{
-		"parent": obj{"type": "data_source_id", "data_source_id": dataSourceID},
-		"properties": obj{
-			"Title":       obj{"type": "title", "title": textItems(title)},
-			"Local ID":    obj{"type": "rich_text", "rich_text": textItems(localID)},
-			"Start":       obj{"type": "date", "date": obj{"start": startTruncated}},
-			"End":         obj{"type": "date", "date": obj{"start": endTruncated}},
-			"Description": obj{"type": "rich_text", "rich_text": textItems(description)},
-			"Task":        obj{"type": "relation", "relation": relationItems(taskPageID)},
-		},
-	}
-
-	b, err := json.Marshal(body)
+	payload, err := entryPagePayload(dataSourceID, title, description, localID, taskPageID, start, end)
 	if err != nil {
-		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+		return Page{}, err
 	}
-
-	payload := bytes.NewReader(b)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
 	if err != nil {
 		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
@@ -142,4 +125,70 @@ func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localID
 	}
 
 	return page, found, nil
+}
+
+// UpdateEntryPage sends a PATCH request to Notion to update a Page in the Time entries data source
+func (c *Client) UpdateEntryPage(ctx context.Context, pageID, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (Page, error) {
+	url := fmt.Sprintf("%s/pages/%s", c.baseURL, pageID)
+
+	payload, err := entryPagePayload(dataSourceID, title, description, localID, taskPageID, start, end)
+	if err != nil {
+		return Page{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, payload)
+	if err != nil {
+		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+	}
+	addDefaultHeaders(req, c.apiVersion, c.apiToken)
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return Page{}, &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
+	}
+	defer res.Body.Close()
+
+	bytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+	}
+
+	err = handleErrorResponse(res, bytes)
+	if err != nil {
+		return Page{}, err
+	}
+
+	var p Page
+	err = json.Unmarshal(bytes, &p)
+	if err != nil {
+		return Page{}, &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response", Cause: err}
+	}
+
+	return p, nil
+}
+
+// entryPagePayload builds and returns a JSON payload to be used in POST/PATCH requests
+// to Notion. Start and end times are truncated to the minute
+func entryPagePayload(dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (*bytes.Reader, error) {
+	startTruncated := start.UTC().Truncate(time.Minute).Format(time.RFC3339)
+	endTruncated := end.UTC().Truncate(time.Minute).Format(time.RFC3339)
+
+	body := obj{
+		"parent": obj{"type": "data_source_id", "data_source_id": dataSourceID},
+		"properties": obj{
+			"Title":       obj{"type": "title", "title": textItems(title)},
+			"Local ID":    obj{"type": "rich_text", "rich_text": textItems(localID)},
+			"Start":       obj{"type": "date", "date": obj{"start": startTruncated}},
+			"End":         obj{"type": "date", "date": obj{"start": endTruncated}},
+			"Description": obj{"type": "rich_text", "rich_text": textItems(description)},
+			"Task":        obj{"type": "relation", "relation": relationItems(taskPageID)},
+		},
+	}
+
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, &clierr.Error{Code: clierr.Internal, Message: "unable to marshal entry page JSON", Cause: err}
+	}
+
+	return bytes.NewReader(b), nil
 }

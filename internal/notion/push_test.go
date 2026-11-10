@@ -437,3 +437,287 @@ func TestCreateEntryPage_Unreachable_ReturnsOffline(t *testing.T) {
 		t.Errorf("error includes the token: %v", err)
 	}
 }
+
+func TestFindEntryPage_Found_ReturnsPage(t *testing.T) {
+	const want = "entry-page-1"
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseBody := `{
+			"object": "list",
+			"type": "page_or_data_source",
+			"has_more": false,
+			"next_cursor": null,
+			"results": [{"object": "page", "id": "entry-page-1"}]
+		}`
+
+		if _, err := w.Write([]byte(responseBody)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, "test-token", s.Client())
+
+	page, found, err := nc.FindEntryPage(t.Context(), "entries-ds", "Local ID", "local-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+
+	if page.ID != want {
+		t.Errorf("page ID = %q, want %q", page.ID, want)
+	}
+}
+
+// No match is the usual case on a first sync, so it's not an error: the caller goes on to create
+func TestFindEntryPage_NotFound(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty results", body: `{"object": "list", "has_more": false, "next_cursor": null, "results": []}`},
+		// Edge cases
+		{name: "null results", body: `{"object": "list", "has_more": false, "next_cursor": null, "results": null}`},
+		{name: "missing results", body: `{"object": "list", "has_more": false, "next_cursor": null}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			page, found, err := nc.FindEntryPage(t.Context(), "entries-ds", "Local ID", "local-1")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if found {
+				t.Error("found = true, want false")
+			}
+
+			if page.ID != "" {
+				t.Errorf("expected no page when nothing is found, got %q", page.ID)
+			}
+		})
+	}
+}
+
+// The lookup is the idempotency check (DESIGN.md §6.2), so it has to filter on exactly the Local ID
+// property and value, or a retry could miss the row it created and duplicate it
+func TestFindEntryPage_RequestShape(t *testing.T) {
+	const (
+		dataSourceID = "entries-ds"
+		localIDKey   = "Local ID"
+		localID      = "0b9e6c3a-1f2d-4e5a-8b7c-6d5e4f3a2b1c"
+		token        = "test-token"
+	)
+
+	wantPath := "/data_sources/" + dataSourceID + "/query"
+	wantHeaders := map[string]string{
+		"Authorization":  "Bearer " + token,
+		"Notion-Version": "2026-03-11",
+		"Content-Type":   "application/json",
+	}
+
+	var requests atomic.Int32
+	// Decoded into a map rather than a struct, so a missing key can be told apart from an empty value
+	var body map[string]any
+
+	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want %q", r.Method, http.MethodPost)
+		}
+
+		if r.URL.Path != wantPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, wantPath)
+		}
+
+		for name, want := range wantHeaders {
+			if got := r.Header.Get(name); got != want {
+				t.Errorf("header %s = %q, want %q", name, got, want)
+			}
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("request body is not valid JSON: %v", err)
+		}
+
+		if _, err := w.Write([]byte(`{"object": "list", "has_more": false, "results": []}`)); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	nc := NewClient(s.URL, token, s.Client())
+
+	if _, _, err := nc.FindEntryPage(t.Context(), dataSourceID, localIDKey, localID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Errorf("unexpected request count. Got %d, want 1", got)
+	}
+
+	// A lookup never pages, so there's no cursor to send
+	if cursor, ok := body["start_cursor"]; ok {
+		t.Errorf("start_cursor = %v, want the key to be omitted", cursor)
+	}
+
+	// encoding/json decodes JSON numbers into float64 when the target is any
+	if got, want := body["page_size"], float64(1); got != want {
+		t.Errorf("page_size = %v, want %v", got, want)
+	}
+
+	filter, ok := body["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("filter = %v, want an object", body["filter"])
+	}
+
+	if got := filter["property"]; got != localIDKey {
+		t.Errorf("filter property = %v, want %q", got, localIDKey)
+	}
+
+	richText, ok := filter["rich_text"].(map[string]any)
+	if !ok {
+		t.Fatalf("filter rich_text = %v, want an object", filter["rich_text"])
+	}
+
+	if got := richText["equals"]; got != localID {
+		t.Errorf("filter rich_text.equals = %v, want %q", got, localID)
+	}
+}
+
+func TestFindEntryPage_ErrorResponse_ReturnsCLIError(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantCode clierr.ErrorCode
+	}{
+		{
+			name:     "bad request",
+			status:   http.StatusBadRequest,
+			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "body failed validation"}`,
+			wantCode: clierr.Usage,
+		},
+		{
+			name:     "invalid token",
+			status:   http.StatusUnauthorized,
+			body:     `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`,
+			wantCode: clierr.AccessDenied,
+		},
+		{
+			// What Notion returns for a data source that isn't shared with the integration, too
+			name:     "data source not found",
+			status:   http.StatusNotFound,
+			body:     `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find data source."}`,
+			wantCode: clierr.NotFound,
+		},
+		{
+			name:     "server error",
+			status:   http.StatusInternalServerError,
+			body:     `{"object": "error", "status": 500, "code": "internal_server_error", "message": "Unexpected error occurred."}`,
+			wantCode: clierr.Internal,
+		},
+		// Edge cases
+		{
+			name:     "unmapped status",
+			status:   http.StatusServiceUnavailable,
+			body:     `{"object": "error", "status": 503, "code": "service_unavailable", "message": "Notion is unavailable."}`,
+			wantCode: clierr.Internal,
+		},
+		{
+			name:     "error body is not JSON",
+			status:   http.StatusBadGateway,
+			body:     `<html><body>502 Bad Gateway</body></html>`,
+			wantCode: clierr.Internal,
+		},
+		{
+			// A 200 that can't be read must not look like "not found", or sync would create a duplicate
+			name:     "success body is not JSON",
+			status:   http.StatusOK,
+			body:     `<html><body>not JSON</body></html>`,
+			wantCode: clierr.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			page, found, err := nc.FindEntryPage(t.Context(), "entries-ds", "Local ID", "local-1")
+			if err == nil {
+				t.Fatalf("expected an error, got found = %v, page %q", found, page.ID)
+			}
+
+			if found || page.ID != "" {
+				t.Errorf("expected no page alongside an error, got found = %v, page %q", found, page.ID)
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+
+			if ce.Code != tc.wantCode {
+				t.Errorf("error code = %q, want %q", ce.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// When Notion can't be reached there's no HTTP status to map, so the error is offline (DESIGN.md §8)
+func TestFindEntryPage_Unreachable_ReturnsOffline(t *testing.T) {
+	const token = "secret-test-token"
+
+	// See TestQueryDataSource_Unreachable_ReturnsOffline for why this needs NewServer
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to a closed server: %s %s", r.Method, r.URL.Path)
+	}))
+	nc := NewClient(s.URL, token, s.Client())
+
+	s.Close()
+
+	page, found, err := nc.FindEntryPage(t.Context(), "entries-ds", "Local ID", "local-1")
+	if err == nil {
+		t.Fatalf("expected an error, got found = %v, page %q", found, page.ID)
+	}
+
+	// Offline must not read as "not found", or the caller would go on to create
+	if found {
+		t.Error("found = true alongside an error, want false")
+	}
+
+	var ce *clierr.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("error %v is not a *clierr.Error", err)
+	}
+
+	if ce.Code != clierr.Offline {
+		t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+	}
+
+	// The cause is printed with the error, so it must never carry the token (DESIGN.md §9)
+	if strings.Contains(err.Error(), token) || (ce.Cause != nil && strings.Contains(ce.Cause.Error(), token)) {
+		t.Errorf("error includes the token: %v", err)
+	}
+}

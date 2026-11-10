@@ -64,3 +64,15 @@ func formatMilliseconds(d time.Duration) string {
 
 	return d.Round(100 * time.Millisecond).String()
 }
+
+// formatTaskLabel returns the task name plus shortID if present, otherwise just the task name
+func formatTaskLabel(t TaskRef) string {
+	var taskLabel string
+	if t.ShortID != "" {
+		taskLabel = fmt.Sprintf("\"%s\" [task %s]", t.Name, t.ShortID)
+	} else {
+		taskLabel = fmt.Sprintf("\"%s\"", t.Name)
+	}
+
+	return taskLabel
+}

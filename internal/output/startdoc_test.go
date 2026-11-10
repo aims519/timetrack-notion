@@ -168,3 +168,73 @@ func TestStartDoc_WriteTable_StoppedEntry(t *testing.T) {
 		})
 	}
 }
+
+// A started entry with a task echoes the task's name and short ID (§3.1). With no description,
+// the task stands in for it rather than "(no description)"
+func TestStartDoc_WriteTable_WithTask(t *testing.T) {
+	const fullID = "0605115f-a394-4b6d-a8f7-528408bbc44f"
+	description := "writing tests"
+	start := time.Date(2026, 1, 1, 9, 30, 0, 0, time.UTC)
+	withShortID := &TaskRef{PageID: "3f63b23e837922", ShortID: "837922", Name: "Write the sync engine"}
+	noShortID := &TaskRef{PageID: "3f63b23e837922", Name: "Write the sync engine"}
+
+	// want is the line without its trailing newline, so it can be a raw string
+	tests := []struct {
+		name        string
+		description *string
+		task        *TaskRef
+		want        string
+	}{
+		{"task_and_description", &description, withShortID,
+			`Started tracking "writing tests" on "Write the sync engine" [task 837922] at 09:30 (0605115)`},
+		{"task_no_description", nil, withShortID,
+			`Started tracking "Write the sync engine" [task 837922] at 09:30 (0605115)`},
+		{"task_no_short_id", &description, noShortID,
+			`Started tracking "writing tests" on "Write the sync engine" at 09:30 (0605115)`},
+		{"task_no_short_id_no_description", nil, noShortID,
+			`Started tracking "Write the sync engine" at 09:30 (0605115)`},
+		{"no_task", &description, nil,
+			`Started tracking "writing tests" at 09:30 (0605115)`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := Entry{ID: fullID, Start: NewUTCTime(start), Description: tc.description, Task: tc.task, SyncState: "pending"}
+			doc := NewStartDoc(e, nil, nil)
+			w := &bytes.Buffer{}
+
+			err := doc.WriteTable(w, time.UTC)
+			if err != nil {
+				t.Fatalf("WriteTable() error = %v", err)
+			}
+
+			if got, want := w.String(), tc.want+"\n"; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// On a switch, the started entry echoes its task while the stopped line is unchanged
+func TestStartDoc_WriteTable_SwitchWithTask(t *testing.T) {
+	switchAt := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	end := NewUTCTime(switchAt)
+	stoppedDescription := "organising calendar"
+	stopped := &Entry{ID: "11111111-1111-1111-1111-111111111111", Start: NewUTCTime(time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)), End: &end, Description: &stoppedDescription, SyncState: "pending"}
+	started := Entry{ID: "0605115f-a394-4b6d-a8f7-528408bbc44f", Start: NewUTCTime(switchAt), Task: &TaskRef{PageID: "3f63b23e837922", ShortID: "837922", Name: "Write the sync engine"}, SyncState: "pending"}
+
+	doc := NewStartDoc(started, stopped, nil)
+	w := &bytes.Buffer{}
+
+	if err := doc.WriteTable(w, time.UTC); err != nil {
+		t.Fatalf("WriteTable() error = %v", err)
+	}
+
+	want := strings.Join([]string{
+		`Stopped tracking "organising calendar" at 10:00 (1111111)`,
+		`Started tracking "Write the sync engine" [task 837922] at 10:00 (0605115)`,
+	}, "\n") + "\n"
+	if got := w.String(); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

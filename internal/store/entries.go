@@ -80,7 +80,7 @@ func (s *Store) CompleteSync(ctx context.Context, entryID, syncState string, syn
 		sync_error = ?3,
 		synced_at = ?4
 		WHERE id = ?6
-		AND (updated_at = ?5) -- entries updated since the sync began should remain pending
+		AND (updated_at = ?5) -- entries updated since the sync read it should remain pending
 	`, entryPageID, syncState, syncError, syncedAtFormatted, ToDBString(lastUpdatedAt), entryID)
 	if err != nil {
 		return false, &clierr.Error{Code: clierr.Internal, Message: "error updating entries row", Cause: err}

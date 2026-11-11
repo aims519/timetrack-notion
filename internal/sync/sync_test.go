@@ -202,7 +202,7 @@ func checkCode(t *testing.T, err error, want clierr.ErrorCode) {
 
 	var cliErr *clierr.Error
 	if !errors.As(err, &cliErr) {
-		t.Fatalf("Run() = %v, want *clierr.Error", err)
+		t.Fatalf("error = %v, want *clierr.Error", err)
 	}
 	if cliErr.Code != want {
 		t.Errorf("error code = %q, want %q", cliErr.Code, want)
@@ -432,11 +432,6 @@ func TestRun_NotionErrorOnOneEntry(t *testing.T) {
 		{name: "bad_request", err: &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}, wantState: "blocked"},
 		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantState: "blocked"},
 		{name: "server_error", err: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantState: "failed"},
-		{
-			name:      "rate_limited",
-			err:       &clierr.Error{Code: clierr.Offline, Message: "too many requests to Notion", Cause: &notion.TooManyRequestsError{}},
-			wantState: "failed",
-		},
 	}
 
 	for _, tc := range tests {
@@ -475,17 +470,56 @@ func TestRun_RetriesFailedEntry(t *testing.T) {
 	checkStored(t, st, entry.ID, "synced", "page-1")
 }
 
+// A rate limit or a rejected token stops the run without recording a result, so the entry that
+// hit it and every entry after it stay pending for the next run (§6.3)
+func TestRun_AbortsRun(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode clierr.ErrorCode
+	}{
+		{
+			name:     "rate_limited",
+			err:      &clierr.Error{Code: clierr.Offline, Message: "too many requests to Notion", Cause: &notion.TooManyRequestsError{}},
+			wantCode: clierr.Offline,
+		},
+		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			first := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			second := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
+
+			// Both entries fail, so the test doesn't depend on which one the run reaches first
+			m := &fakeEntryManager{createErr: map[string]error{first.ID: tc.err, second.ID: tc.err}}
+
+			err := Run(t.Context(), st, m, runClock(0), lockPath)
+
+			checkCode(t, err, tc.wantCode)
+			if len(m.creates) != 1 {
+				t.Errorf("CreateEntryPage called %d times, want 1", len(m.creates))
+			}
+			checkStored(t, st, first.ID, "pending", "")
+			checkStored(t, st, second.ID, "pending", "")
+		})
+	}
+}
+
 func TestHandleSyncError(t *testing.T) {
 	tests := []struct {
 		name      string
 		err       error
-		wantState string
+		wantState string           // when the run carries on
+		wantCode  clierr.ErrorCode // when the run stops
 	}{
 		{
-			name:      "rate_limited",
-			err:       &clierr.Error{Code: clierr.Offline, Message: "too many requests to Notion", Cause: &notion.TooManyRequestsError{RetryAfterSeconds: new(30)}},
-			wantState: "failed",
+			name:     "rate_limited",
+			err:      &clierr.Error{Code: clierr.Offline, Message: "too many requests to Notion", Cause: &notion.TooManyRequestsError{RetryAfterSeconds: new(30)}},
+			wantCode: clierr.Offline,
 		},
+		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
 		{name: "bad_request", err: &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}, wantState: "blocked"},
 		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantState: "blocked"},
 		{name: "server_error", err: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantState: "failed"},
@@ -494,8 +528,16 @@ func TestHandleSyncError(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := handleSyncError(tc.err)
+			got, err := handleSyncError(tc.err)
 
+			if tc.wantCode != "" {
+				checkCode(t, err, tc.wantCode)
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("handleSyncError() error = %v, want nil", err)
+			}
 			if got.Status != tc.wantState {
 				t.Errorf("Status = %q, want %q", got.Status, tc.wantState)
 			}

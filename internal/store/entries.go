@@ -8,10 +8,10 @@ import (
 )
 
 // PendingEntries returns all entry rows that are pending sync to Notion
-func (s *Store) PendingEntries(ctx context.Context) ([]Entry, error) {
+func (s *Store) PendingEntries(ctx context.Context, contextID string) ([]Entry, error) {
 	rows, err := s.connectionPool.QueryContext(ctx, `
 		SELECT
-		id,
+		entries.id,
 		description,
 		start_utc,
 		end_utc,
@@ -22,9 +22,12 @@ func (s *Store) PendingEntries(ctx context.Context) ([]Entry, error) {
 		updated_at
 		FROM entries
 		JOIN tasks ON entries.task_page_id = tasks.page_id
+			AND tasks.context_id = entries.context_id
 		WHERE entries.sync_state IN ('pending', 'failed')
+		AND entries.context_id = ?1
 		AND entries.end_utc IS NOT NULL
-	`)
+		ORDER BY entries.start_utc
+	`, contextID)
 	if err != nil {
 		return nil, &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to query entries: " + err.Error(), Cause: err, Details: map[string]any{"path": s.dbPath}}
 	}

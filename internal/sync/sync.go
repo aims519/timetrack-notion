@@ -37,14 +37,17 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		return &clierr.Error{Code: clierr.NotInitialised, Message: "Notion context not fully initialised, run 'tt init'"}
 	}
 
-	pending, err := s.PendingEntries(ctx)
+	pending, err := s.PendingEntries(ctx, store.DefaultContextID)
 	if err != nil {
 		return err
 	}
 
 	// Create/Update entry pages
 	for _, p := range pending {
-		result := syncPendingEntry(ctx, *notionContext.EntriesDataSourceID, p, s, m, clock, attemptedAtUTC)
+		result, err := syncPendingEntry(ctx, *notionContext.EntriesDataSourceID, p, s, m, clock, attemptedAtUTC)
+		if err != nil {
+			return err
+		}
 
 		// update db entry with synced_at, sync_error, sync_state
 		err = s.CompleteSync(ctx, p.ID, result.Status, result.SyncError, result.EntryPageID, attemptedAtUTC, result.SyncedAt)
@@ -71,53 +74,13 @@ type notionEntryManager interface {
 	TrashEntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error)
 }
 
-type syncResult struct {
-	EntryPageID *string
-	Status      string
-	SyncedAt    *time.Time
-	SyncError   *string
-}
-
-// syncResultSuccess constructs a syncResult with status of 'synced', with appropriate
-// properties set
-func syncResultSuccess(entryPageID string, syncedAt time.Time) syncResult {
-	return syncResult{
-		EntryPageID: &entryPageID,
-		Status:      "synced",
-		SyncedAt:    &syncedAt,
-		SyncError:   nil,
-	}
-}
-
-// syncResultFailed constructs a syncResult with a status of 'failed', with appropriate
-// properties set
-func syncResultFailed(syncError string) syncResult {
-	return syncResult{
-		EntryPageID: nil,
-		Status:      "failed",
-		SyncedAt:    nil,
-		SyncError:   &syncError,
-	}
-}
-
-// syncResultFailed constructs a syncResult with a status of 'blocked', with appropriate
-// properties set
-func syncResultBlocked(syncError string) syncResult {
-	return syncResult{
-		EntryPageID: nil,
-		Status:      "blocked",
-		SyncedAt:    nil,
-		SyncError:   &syncError,
-	}
-}
-
 // syncPendingEntry updates Notion with the details of a pending entry, and records the sync result
 // in the database
-func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.Entry, s *store.Store, m notionEntryManager, clock clock, attemptedAtUTC time.Time) syncResult {
+func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.Entry, s *store.Store, m notionEntryManager, clock clock, attemptedAtUTC time.Time) (syncResult, error) {
 	// set create_attempted_at
 	err := s.SyncAttempt(ctx, e.ID, attemptedAtUTC)
 	if err != nil {
-		return handleSyncError(err)
+		return syncResult{}, err
 	}
 
 	// default title to description, else task name
@@ -158,31 +121,73 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 
 	// success case
 	syncedAt := clock.NowUTC()
-	return syncResultSuccess(*entryPageID, syncedAt)
+	return syncResultSuccess(*entryPageID, syncedAt), nil
 }
 
 // handleSyncError maps an error encountered during a sync operation to Notion to a syncResult,
 // which should then be used to update the entry in the database accordingly
-func handleSyncError(err error) syncResult {
+func handleSyncError(err error) (syncResult, error) {
 	// TODO handle too many request errors with retries, for now fail the sync
 	var tooManyReq *notion.TooManyRequestsError
 	if errors.As(err, &tooManyReq) {
-		return syncResultFailed(tooManyReq.Error())
+		return syncResult{}, &clierr.Error{Code: clierr.Offline, Message: "notion unresponsive, too many requests"}
 	}
 
 	var cliErr *clierr.Error
 	if errors.As(err, &cliErr) {
 		switch cliErr.Code {
 		case clierr.AccessDenied:
-			return syncResultBlocked(cliErr.Message)
+			return syncResult{}, &clierr.Error{Code: clierr.AccessDenied, Message: "notion access denied, token invalid"}
 		case clierr.Usage:
-			return syncResultBlocked(cliErr.Message)
+			return syncResultBlocked(cliErr.Message), nil
 		case clierr.NotFound:
-			return syncResultBlocked(cliErr.Message)
+			return syncResultBlocked(cliErr.Message), nil
+		case clierr.Offline:
+			return syncResult{}, &clierr.Error{Code: clierr.Offline, Message: "notion unresponsive"}
 		default:
-			return syncResultFailed(cliErr.Error())
+			return syncResultFailed(cliErr.Error()), nil
 		}
 	}
 
-	return syncResultFailed(err.Error())
+	return syncResultFailed(err.Error()), nil
+}
+
+type syncResult struct {
+	EntryPageID *string
+	Status      string
+	SyncedAt    *time.Time
+	SyncError   *string
+}
+
+// syncResultSuccess constructs a syncResult with status of 'synced', with appropriate
+// properties set
+func syncResultSuccess(entryPageID string, syncedAt time.Time) syncResult {
+	return syncResult{
+		EntryPageID: &entryPageID,
+		Status:      "synced",
+		SyncedAt:    &syncedAt,
+		SyncError:   nil,
+	}
+}
+
+// syncResultFailed constructs a syncResult with a status of 'failed', with appropriate
+// properties set
+func syncResultFailed(syncError string) syncResult {
+	return syncResult{
+		EntryPageID: nil,
+		Status:      "failed",
+		SyncedAt:    nil,
+		SyncError:   &syncError,
+	}
+}
+
+// syncResultFailed constructs a syncResult with a status of 'blocked', with appropriate
+// properties set
+func syncResultBlocked(syncError string) syncResult {
+	return syncResult{
+		EntryPageID: nil,
+		Status:      "blocked",
+		SyncedAt:    nil,
+		SyncError:   &syncError,
+	}
 }

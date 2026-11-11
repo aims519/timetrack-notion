@@ -85,7 +85,7 @@ func TestPendingEntries_Selection(t *testing.T) {
 			tc.entry.id = entryA1
 			insertAttachEntries(t, st, []attachEntry{tc.entry})
 
-			got, err := st.PendingEntries(t.Context())
+			got, err := st.PendingEntries(t.Context(), testContextID)
 			if err != nil {
 				t.Fatalf("PendingEntries() error = %v, want nil", err)
 			}
@@ -112,7 +112,7 @@ func TestPendingEntries_Fields(t *testing.T) {
 	}})
 	setEntryPageID(t, st, entryA1, "page-1")
 
-	got, err := st.PendingEntries(t.Context())
+	got, err := st.PendingEntries(t.Context(), testContextID)
 	if err != nil {
 		t.Fatalf("PendingEntries() error = %v, want nil", err)
 	}
@@ -150,10 +150,44 @@ func TestPendingEntries_Fields(t *testing.T) {
 	}
 }
 
+// Only the named context's entries are returned, each once, even when another context caches a
+// task with the same page ID
+func TestPendingEntries_OtherContext(t *testing.T) {
+	st := openSyncTestStore(t)
+	insertOtherContext(t, st)
+	insertListTasks(t, st, []listTask{{contextID: otherContextID, pageID: syncTaskID, name: "Write tests elsewhere"}})
+	insertAttachEntries(t, st, []attachEntry{
+		{id: entryA1, start: "2026-11-10T09:00:00.000000000Z", end: "2026-11-10T10:00:00.000000000Z", taskID: syncTaskID},
+	})
+	_, err := st.connectionPool.ExecContext(t.Context(), `
+		INSERT INTO entries (id, context_id, start_utc, end_utc, task_page_id, sync_state, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+		entryB, otherContextID, "2026-11-10T11:00:00.000000000Z", "2026-11-10T12:00:00.000000000Z", syncTaskID, "2026-11-10T12:00:00.000000000Z")
+	if err != nil {
+		t.Fatalf("insert entry in other context failed: %v", err)
+	}
+
+	got, err := st.PendingEntries(t.Context(), testContextID)
+	if err != nil {
+		t.Fatalf("PendingEntries() error = %v, want nil", err)
+	}
+
+	if len(got) != 1 || got[0].ID != entryA1 {
+		ids := make([]string, 0, len(got))
+		for _, e := range got {
+			ids = append(ids, e.ID)
+		}
+		t.Fatalf("PendingEntries() ids = %v, want [%s]", ids, entryA1)
+	}
+	if got[0].TaskName == nil || *got[0].TaskName != "Write tests" {
+		t.Errorf("TaskName = %v, want the task from the entry's own context", got[0].TaskName)
+	}
+}
+
 func TestPendingEntries_NoneReturnsEmpty(t *testing.T) {
 	st := openSyncTestStore(t)
 
-	got, err := st.PendingEntries(t.Context())
+	got, err := st.PendingEntries(t.Context(), testContextID)
 	if err != nil {
 		t.Fatalf("PendingEntries() error = %v, want nil", err)
 	}

@@ -178,3 +178,60 @@ func TestRun_Sync_CreatesEntryPage(t *testing.T) {
 		t.Errorf("pending after sync = %d, want 0", got)
 	}
 }
+
+// A rejected token or a rate limit stops the run as a failed command, and the entry stays
+// pending for the next run (§6.3, §8)
+func TestRun_Sync_AbortsRun(t *testing.T) {
+	tests := []struct {
+		name     string
+		response notionResponse
+		wantExit int
+		wantCode clierr.ErrorCode
+	}{
+		{
+			name:     "access_denied",
+			response: notionResponse{http.StatusUnauthorized, `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`},
+			wantExit: 5,
+			wantCode: clierr.AccessDenied,
+		},
+		{
+			name:     "rate_limited",
+			response: notionResponse{http.StatusTooManyRequests, `{"object": "error", "status": 429, "code": "rate_limited", "message": "Rate limited"}`},
+			wantExit: 6,
+			wantCode: clierr.Offline,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			seedAttachTask(t, dbPath)
+
+			s, requested := fakeNotion(t, map[string]notionResponse{entriesQueryPath: tc.response})
+
+			steps := [][]string{
+				{"start", "writing tests", "--task", attachTaskID, "--at", "2026-01-01T09:00:00Z"},
+				{"stop", "--at", "2026-01-01T10:00:00Z"},
+			}
+			for _, args := range steps {
+				code, _, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), args...)
+				if code != 0 {
+					t.Fatalf("%s = %d, want 0 (stderr: %q)", args[0], code, stderr)
+				}
+			}
+
+			code, stdout, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), "sync")
+			if code != tc.wantExit {
+				t.Fatalf("sync = %d, want %d (stderr: %q)", code, tc.wantExit, stderr)
+			}
+			checkErrorDocument(t, stdout, stderr, tc.wantCode)
+
+			if got, want := requested(), []string{entriesQueryPath}; !slices.Equal(got, want) {
+				t.Errorf("sync requested %v, want %v", got, want)
+			}
+			if got := runStatus(t).Counts.Pending; got != 1 {
+				t.Errorf("pending after sync = %d, want 1", got)
+			}
+		})
+	}
+}

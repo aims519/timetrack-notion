@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,10 +56,25 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string, since
 	return pageResults, nil
 }
 
+// addDefaultHeaders adds the HTTP headers that all Notion API requests require
 func addDefaultHeaders(req *http.Request, apiVersion, apiToken string) {
 	req.Header.Add("Notion-Version", apiVersion)
 	req.Header.Add("Authorization", "Bearer "+apiToken)
 	req.Header.Add("Content-Type", "application/json")
+}
+
+// TooManyRequestsError is returned in the case of a 429 response from Notion's API
+// with a number of seconds to wait before retrying. Callers can check for this error
+// using errors.As and handle retries accordingly
+type TooManyRequestsError struct {
+	RetryAfterSeconds *int
+}
+
+func (e *TooManyRequestsError) Error() string {
+	if e.RetryAfterSeconds != nil {
+		return fmt.Sprintf("too many requests, wait %d seconds before retrying", *e.RetryAfterSeconds)
+	}
+	return "too many requests to Notion, no retry timing guidance available"
 }
 
 func handleErrorResponse(res *http.Response, b []byte) error {
@@ -80,7 +96,12 @@ func handleErrorResponse(res *http.Response, b []byte) error {
 	case http.StatusNotFound:
 		return &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}
 	case http.StatusTooManyRequests:
-		return &clierr.Error{Code: clierr.Usage, Message: "too many Notion requests"}
+		var retryAfterSeconds *int
+		s, err := strconv.Atoi(res.Header.Get("Retry-After"))
+		if err == nil && s > 0 {
+			retryAfterSeconds = &s
+		}
+		return &clierr.Error{Code: clierr.Offline, Message: fmt.Sprintf("too many requests to Notion%v", messageDetailSuffix), Cause: &TooManyRequestsError{RetryAfterSeconds: retryAfterSeconds}}
 	case http.StatusInternalServerError:
 		return &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}
 	}

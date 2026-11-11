@@ -59,6 +59,9 @@ func newRootCmd(a *app) *cobra.Command {
 	return rootCmd
 }
 
+// canPrompt decides if commands should be allowed to prompt the user for input. This
+// is true if stdIn, stdOut, stdErr are terminals and the --no-input flag has not
+// been set
 func (a *app) canPrompt(in io.Reader, out, err io.Writer) bool {
 	type descriptor interface {
 		Fd() uintptr
@@ -81,6 +84,8 @@ func (a *app) canPrompt(in io.Reader, out, err io.Writer) bool {
 	return !a.noInput && inTerminal && outTerminal && errTerminal
 }
 
+// run is a testable, internal version of the Run function. Tests pass in a custom app pointer,
+// where the Run function builds it
 func run(ctx context.Context, a *app, args []string, stdout, stderr io.Writer) int {
 	root := newRootCmd(a)
 	root.SetArgs(args)

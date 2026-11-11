@@ -1,3 +1,4 @@
+// Package sync pushes local time entries to Notion
 package sync
 
 import (
@@ -7,8 +8,8 @@ import (
 	"github.com/gofrs/flock"
 )
 
-// Run starts a sync of local entries with Notion. Only one sync can run
-// at a time
+// Run executes all pending sync operations from the database. Will fail with sync_busy
+// if another process holds the lock
 func Run(ctx context.Context, lockPath string) error {
 	fileLock := flock.New(lockPath)
 

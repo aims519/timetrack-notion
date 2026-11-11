@@ -17,4 +17,9 @@ reviews:
             comment must start with the identifier's name
           - a package added in this PR, if none of its files has a package
             comment; the comment must start with "Package <name>"
-          Unexported identifiers don't need a doc comment. Otherwise pass.
+          These don't need a doc comment:
+          - unexported identifiers
+          - methods that implement a standard interface, where the interface
+            already says what they do: Error, Unwrap, Is, As, String,
+            MarshalJSON, UnmarshalJSON, and pflag.Value's Set and Type
+          Otherwise pass.

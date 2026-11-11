@@ -234,6 +234,71 @@ func TestQueryDataSource_ErrorResponse_ReturnsCLIError(t *testing.T) {
 	}
 }
 
+func TestQueryDataSource_TooManyRequests_ReturnsRetryAfter(t *testing.T) {
+	two := 2
+
+	tests := []struct {
+		name        string
+		retryAfter  string // Retry-After header value, not sent when empty
+		wantSeconds *int
+	}{
+		{name: "seconds", retryAfter: "2", wantSeconds: &two},
+		{name: "header missing"},
+		{name: "not a number", retryAfter: "abc"},
+		{name: "not an integer", retryAfter: "1.5"},
+		{name: "negative", retryAfter: "-5"},
+		{name: "zero", retryAfter: "0"},
+		{name: "http date", retryAfter: "Wed, 21 Oct 2026 07:28:00 GMT"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Headers must be set before WriteHeader, or they're dropped
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				body := `{"object": "error", "status": 429, "code": "rate_limited", "message": "You have been rate limited."}`
+				if _, err := w.Write([]byte(body)); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			nc := NewClient(s.URL, "test-token", s.Client())
+
+			_, err := nc.QueryDataSource(t.Context(), "1234", nil)
+			if err == nil {
+				t.Fatal("expected an error for HTTP 429, got nil")
+			}
+
+			var ce *clierr.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("error %v is not a *clierr.Error", err)
+			}
+			if ce.Code != clierr.Offline {
+				t.Errorf("error code = %q, want %q", ce.Code, clierr.Offline)
+			}
+
+			var tmr *TooManyRequestsError
+			if !errors.As(err, &tmr) {
+				t.Fatalf("error %v doesn't wrap a *TooManyRequestsError", err)
+			}
+
+			got := tmr.RetryAfterSeconds
+			switch {
+			case tc.wantSeconds == nil && got != nil:
+				t.Errorf("RetryAfterSeconds = %d, want nil", *got)
+			case tc.wantSeconds != nil && got == nil:
+				t.Errorf("RetryAfterSeconds = nil, want %d", *tc.wantSeconds)
+			case tc.wantSeconds != nil && *got != *tc.wantSeconds:
+				t.Errorf("RetryAfterSeconds = %d, want %d", *got, *tc.wantSeconds)
+			}
+		})
+	}
+}
+
 func TestQueryDataSource_RequestShape(t *testing.T) {
 	const (
 		dataSourceID = "ds-123"

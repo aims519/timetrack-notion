@@ -120,25 +120,36 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 		return handleSyncError(err)
 	}
 
+	// default title to description, else task name
+	var title string
 	var description string
 	if e.Description != nil {
+		title = *e.Description
 		description = *e.Description
+	} else {
+		title = *e.TaskName
 	}
 
-	entryPage, found, err := m.FindEntryPage(ctx, entriesDataSourceID, "Local ID", e.ID)
-	if err != nil {
-		return handleSyncError(err)
-	}
-
-	var entryPageID *string
-	if found {
-		updatedPage, err := m.UpdateEntryPage(ctx, entryPage.ID, entriesDataSourceID, *e.TaskName, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
+	// check if page already exists
+	entryPageID := e.EntryPageID
+	if entryPageID == nil {
+		entryPage, found, err := m.FindEntryPage(ctx, entriesDataSourceID, "Local ID", e.ID)
 		if err != nil {
 			return handleSyncError(err)
 		}
-		entryPageID = &updatedPage.ID
-	} else {
-		createdPage, err := m.CreateEntryPage(ctx, entriesDataSourceID, *e.TaskName, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
+		if found {
+			entryPageID = &entryPage.ID
+		}
+	}
+
+	// Update existing page
+	if entryPageID != nil {
+		_, err := m.UpdateEntryPage(ctx, *entryPageID, entriesDataSourceID, title, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
+		if err != nil {
+			return handleSyncError(err)
+		}
+	} else { // create new page
+		createdPage, err := m.CreateEntryPage(ctx, entriesDataSourceID, title, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
 		if err != nil {
 			return handleSyncError(err)
 		}

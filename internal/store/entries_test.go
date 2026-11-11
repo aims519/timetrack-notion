@@ -253,6 +253,18 @@ func TestCompleteSync(t *testing.T) {
 			wantSyncError: ptr("server error"),
 		},
 		{
+			// A row gone for good is created again, and the new page replaces the old one (§6.3)
+			name:         "synced_replaces_stored_page",
+			storedPageID: ptr("page-old"),
+			updatedAt:    "2026-11-10T10:00:00.000000000Z",
+			state:        "synced",
+			pageID:       ptr("page-new"),
+			syncedAt:     &syncedAt,
+			wantState:    "synced",
+			wantPageID:   ptr("page-new"),
+			wantSyncedAt: &syncedAt,
+		},
+		{
 			// Edited after the sync read it, so it stays pending for the next run (§6.3)
 			name:      "edited_during_sync_stays_pending",
 			updatedAt: ToDBString(syncAttemptedAt.Add(time.Second)),

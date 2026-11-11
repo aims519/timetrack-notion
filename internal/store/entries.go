@@ -72,7 +72,7 @@ func (s *Store) CompleteSync(ctx context.Context, entryID, syncState string, syn
 	}
 	_, err := s.connectionPool.ExecContext(ctx, `
 		UPDATE entries
-		SET entry_page_id = ?1,
+		SET entry_page_id = COALESCE(?1, entry_page_id),
 		sync_state = ?2,
 		sync_error = ?3,
 		synced_at = ?4,

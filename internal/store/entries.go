@@ -67,25 +67,27 @@ func (s *Store) SyncAttempt(ctx context.Context, entryID string, attemptedAtUTC 
 }
 
 // CompleteSync updates an entry row's sync status following an attempt
-func (s *Store) CompleteSync(ctx context.Context, entryID, syncState string, syncError, entryPageID *string, attemptedAtUTC time.Time, syncedAt *time.Time) error {
+func (s *Store) CompleteSync(ctx context.Context, entryID, syncState string, syncError, entryPageID *string, lastUpdatedAt time.Time, syncedAt *time.Time) (bool, error) {
 	var syncedAtFormatted *string
 	if syncedAt != nil {
 		syncedAtStr := ToDBString(*syncedAt)
 		syncedAtFormatted = &syncedAtStr
 	}
-	_, err := s.connectionPool.ExecContext(ctx, `
+	res, err := s.connectionPool.ExecContext(ctx, `
 		UPDATE entries
 		SET entry_page_id = COALESCE(?1, entry_page_id),
 		sync_state = ?2,
 		sync_error = ?3,
-		synced_at = ?4,
-		updated_at = ?5
+		synced_at = ?4
 		WHERE id = ?6
-		AND (updated_at < ?5) -- entries updated since the sync began should remain pending
-	`, entryPageID, syncState, syncError, syncedAtFormatted, ToDBString(attemptedAtUTC), entryID)
+		AND (updated_at = ?5) -- entries updated since the sync began should remain pending
+	`, entryPageID, syncState, syncError, syncedAtFormatted, ToDBString(lastUpdatedAt), entryID)
 	if err != nil {
-		return &clierr.Error{Code: clierr.Internal, Message: "error updating entries row", Cause: err}
+		return false, &clierr.Error{Code: clierr.Internal, Message: "error updating entries row", Cause: err}
+	}
+	if count, _ := res.RowsAffected(); count != 1 {
+		return false, nil
 	}
 
-	return nil
+	return true, nil
 }

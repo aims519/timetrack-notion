@@ -235,43 +235,47 @@ func TestSyncAttempt_UnknownEntry(t *testing.T) {
 func TestCompleteSync(t *testing.T) {
 	syncedAt := syncAttemptedAt.Add(2 * time.Second)
 
+	// updated_at as the sync read it. Every case but the edited one stores this too
+	const readUpdatedAt = "2026-11-10T10:00:00.000000000Z"
+
 	tests := []struct {
-		name          string
-		storedPageID  *string // entry_page_id before the sync
-		updatedAt     string  // updated_at before the sync
-		state         string
-		syncError     *string
-		pageID        *string
-		syncedAt      *time.Time
-		wantState     string
-		wantPageID    *string
-		wantSyncError *string
-		wantSyncedAt  *time.Time
+		name            string
+		storedPageID    *string // entry_page_id before the sync
+		storedUpdatedAt string  // updated_at when the result is written, if not readUpdatedAt
+		state           string
+		syncError       *string
+		pageID          *string
+		syncedAt        *time.Time
+		wantApplied     bool
+		wantState       string
+		wantPageID      *string
+		wantSyncError   *string
+		wantSyncedAt    *time.Time
 	}{
 		{
-			name:       "synced_records_page",
-			updatedAt:  "2026-11-10T10:00:00.000000000Z",
-			state:      "synced",
-			pageID:     ptr("page-1"),
-			syncedAt:   &syncedAt,
-			wantState:  "synced",
-			wantPageID: ptr("page-1"),
+			name:        "synced_records_page",
+			state:       "synced",
+			pageID:      ptr("page-1"),
+			syncedAt:    &syncedAt,
+			wantApplied: true,
+			wantState:   "synced",
+			wantPageID:  ptr("page-1"),
 			// sync_error is cleared on success
 			wantSyncedAt: &syncedAt,
 		},
 		{
 			name:          "failed_records_error",
-			updatedAt:     "2026-11-10T10:00:00.000000000Z",
 			state:         "failed",
 			syncError:     ptr("server error"),
+			wantApplied:   true,
 			wantState:     "failed",
 			wantSyncError: ptr("server error"),
 		},
 		{
 			name:          "blocked_records_error",
-			updatedAt:     "2026-11-10T10:00:00.000000000Z",
 			state:         "blocked",
 			syncError:     ptr("rejected request by Notion"),
+			wantApplied:   true,
 			wantState:     "blocked",
 			wantSyncError: ptr("rejected request by Notion"),
 		},
@@ -279,9 +283,9 @@ func TestCompleteSync(t *testing.T) {
 			// A failed update must not lose the page an earlier sync created (§4, §6.3)
 			name:          "failed_keeps_stored_page",
 			storedPageID:  ptr("page-1"),
-			updatedAt:     "2026-11-10T10:00:00.000000000Z",
 			state:         "failed",
 			syncError:     ptr("server error"),
+			wantApplied:   true,
 			wantState:     "failed",
 			wantPageID:    ptr("page-1"),
 			wantSyncError: ptr("server error"),
@@ -290,22 +294,35 @@ func TestCompleteSync(t *testing.T) {
 			// A row gone for good is created again, and the new page replaces the old one (§6.3)
 			name:         "synced_replaces_stored_page",
 			storedPageID: ptr("page-old"),
-			updatedAt:    "2026-11-10T10:00:00.000000000Z",
 			state:        "synced",
 			pageID:       ptr("page-new"),
 			syncedAt:     &syncedAt,
+			wantApplied:  true,
 			wantState:    "synced",
 			wantPageID:   ptr("page-new"),
 			wantSyncedAt: &syncedAt,
 		},
 		{
-			// Edited after the sync read it, so it stays pending for the next run (§6.3)
-			name:      "edited_during_sync_stays_pending",
-			updatedAt: ToDBString(syncAttemptedAt.Add(time.Second)),
-			state:     "synced",
-			pageID:    ptr("page-1"),
-			syncedAt:  &syncedAt,
-			wantState: "pending",
+			// Edited after the sync read it, so nothing is written and it stays pending for the
+			// next run (§6.3)
+			name:            "edited_after_read_stays_pending",
+			storedUpdatedAt: "2026-11-10T10:00:00.000000001Z",
+			state:           "synced",
+			pageID:          ptr("page-1"),
+			syncedAt:        &syncedAt,
+			wantApplied:     false,
+			wantState:       "pending",
+		},
+		{
+			// Only an unchanged updated_at counts, so an edit stamped earlier than the read, as
+			// after the clock steps back, still leaves the entry pending
+			name:            "edited_with_earlier_clock_stays_pending",
+			storedUpdatedAt: "2026-11-10T09:59:00.000000000Z",
+			state:           "synced",
+			pageID:          ptr("page-1"),
+			syncedAt:        &syncedAt,
+			wantApplied:     false,
+			wantState:       "pending",
 		},
 	}
 
@@ -315,15 +332,27 @@ func TestCompleteSync(t *testing.T) {
 			insertAttachEntries(t, st, []attachEntry{
 				{id: entryA1, start: "2026-11-10T09:00:00.000000000Z", end: "2026-11-10T10:00:00.000000000Z", taskID: syncTaskID},
 			})
+			storedUpdatedAt := tc.storedUpdatedAt
+			if storedUpdatedAt == "" {
+				storedUpdatedAt = readUpdatedAt
+			}
 			_, err := st.connectionPool.ExecContext(t.Context(), `UPDATE entries SET updated_at = ?, entry_page_id = ? WHERE id = ?`,
-				tc.updatedAt, tc.storedPageID, entryA1)
+				storedUpdatedAt, tc.storedPageID, entryA1)
 			if err != nil {
 				t.Fatalf("seed entry failed: %v", err)
 			}
 
-			err = st.CompleteSync(t.Context(), entryA1, tc.state, tc.syncError, tc.pageID, syncAttemptedAt, tc.syncedAt)
+			lastUpdatedAt, err := FromDBString(readUpdatedAt)
+			if err != nil {
+				t.Fatalf("FromDBString(%q): %v", readUpdatedAt, err)
+			}
+
+			applied, err := st.CompleteSync(t.Context(), entryA1, tc.state, tc.syncError, tc.pageID, lastUpdatedAt, tc.syncedAt)
 			if err != nil {
 				t.Fatalf("CompleteSync() error = %v, want nil", err)
+			}
+			if applied != tc.wantApplied {
+				t.Errorf("CompleteSync() applied = %v, want %v", applied, tc.wantApplied)
 			}
 
 			got := readSyncStoredEntry(t, st, entryA1)
@@ -339,6 +368,18 @@ func TestCompleteSync(t *testing.T) {
 			}
 			checkNullString(t, "synced_at", got.syncedAt, wantSyncedAt)
 		})
+	}
+}
+
+func TestCompleteSync_UnknownEntry(t *testing.T) {
+	st := openSyncTestStore(t)
+
+	applied, err := st.CompleteSync(t.Context(), entryA1, "synced", nil, ptr("page-1"), syncAttemptedAt, &syncAttemptedAt)
+	if err != nil {
+		t.Fatalf("CompleteSync() error = %v, want nil", err)
+	}
+	if applied {
+		t.Errorf("CompleteSync() applied = true, want false")
 	}
 }
 

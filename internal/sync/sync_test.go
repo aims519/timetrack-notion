@@ -33,11 +33,11 @@ func (fc fakeClock) NowUTC() time.Time {
 	return fc.nowUTC
 }
 
-// runClock is a clock for one sync run. The store stamps updated_at with the wall clock when an
-// entry is started or stopped, and CompleteSync only records a result for entries updated before
-// the run began, so a run's clock must be later than the seeding. offset orders several runs
+// runClock is a clock for one sync run, offset to order several runs. It's fixed in the past,
+// earlier than the wall-clock updated_at the store stamps when seeding, because the result of a
+// run must not depend on how its clock compares with an entry's updated_at
 func runClock(offset time.Duration) fakeClock {
-	return fakeClock{nowUTC: time.Now().UTC().Add(time.Hour + offset)}
+	return fakeClock{nowUTC: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Add(offset)}
 }
 
 var _ notionEntryManager = (*fakeEntryManager)(nil)
@@ -60,6 +60,7 @@ type fakeEntryManager struct {
 	createdPageID string
 	findErr       map[string]error
 	createErr     map[string]error
+	onCreate      func(localID string) // runs during each create, before it returns
 	updateErr     map[string]error
 
 	finds   []string // local IDs looked up
@@ -80,6 +81,9 @@ func (f *fakeEntryManager) FindEntryPage(ctx context.Context, entriesDataSourceI
 
 func (f *fakeEntryManager) CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error) {
 	f.creates = append(f.creates, entryPageCall{dataSourceID: dataSourceID, title: title, description: description, localID: localID, taskPageID: taskPageID, start: start, end: end})
+	if f.onCreate != nil {
+		f.onCreate(localID)
+	}
 	if err := f.createErr[localID]; err != nil {
 		return notion.Page{}, err
 	}
@@ -419,6 +423,36 @@ func TestRun_EntryWithPageID_UpdatesDirectly(t *testing.T) {
 		t.Errorf("UpdateEntryPage calls = %+v, want one for page-1", m.updates)
 	}
 
+	checkStored(t, st, entry.ID, "synced", "page-1")
+}
+
+// An entry edited while its create is in flight stays pending, and the next run finds the page
+// by Local ID rather than creating a second one (§6.2, §6.3). The edit goes through the store
+// during the request, so this also fails if a transaction is held across it (§4)
+func TestRun_EditedDuringSync_StaysPending(t *testing.T) {
+	st, lockPath := openSyncStore(t, true)
+	entry := seedStoppedEntry(t, st, nil, testStart, testEnd)
+
+	m := &fakeEntryManager{
+		createdPageID: "page-1",
+		onCreate: func(localID string) {
+			if _, err := st.AttachTaskToEntry(t.Context(), localID, testTaskID, time.Now().UTC().Add(time.Second)); err != nil {
+				t.Errorf("AttachTaskToEntry() during create: %v", err)
+			}
+		},
+	}
+	if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+		t.Fatalf("first Run() = %v, want nil", err)
+	}
+	checkStored(t, st, entry.ID, "pending", "")
+
+	next := &fakeEntryManager{foundPages: map[string]notion.Page{entry.ID: {ID: "page-1"}}}
+	if err := Run(t.Context(), st, next, runClock(time.Minute), lockPath); err != nil {
+		t.Fatalf("second Run() = %v, want nil", err)
+	}
+	if len(next.creates) != 0 {
+		t.Errorf("CreateEntryPage called %d times on the next run, want 0", len(next.creates))
+	}
 	checkStored(t, st, entry.ID, "synced", "page-1")
 }
 

@@ -50,7 +50,7 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		}
 
 		// update db entry with synced_at, sync_error, sync_state
-		err = s.CompleteSync(ctx, p.ID, result.Status, result.SyncError, result.EntryPageID, attemptedAtUTC, result.SyncedAt)
+		_, err = s.CompleteSync(ctx, p.ID, result.Status, result.SyncError, result.EntryPageID, p.UpdatedAt, result.SyncedAt)
 		if err != nil {
 			return err
 		}
@@ -130,7 +130,7 @@ func handleSyncError(err error) (syncResult, error) {
 	// TODO handle too many request errors with retries, for now fail the sync
 	var tooManyReq *notion.TooManyRequestsError
 	if errors.As(err, &tooManyReq) {
-		return syncResult{}, &clierr.Error{Code: clierr.Offline, Message: "notion unresponsive, too many requests"}
+		return syncResult{}, &clierr.Error{Code: clierr.Offline, Message: "notion unresponsive, too many requests", Cause: err}
 	}
 
 	var cliErr *clierr.Error

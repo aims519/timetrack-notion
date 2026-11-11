@@ -109,21 +109,33 @@ func TestDBFilePathPerOS_Override(t *testing.T) {
 func TestDBFilePathPerOS_EmptyOverride(t *testing.T) {
 	tests := []struct {
 		name   string
-		setEnv func(t *testing.T)
+		setEnv func(t *testing.T) string // returns the default data directory this case would fall back to
 		goos   string
 	}{
-		{name: "xdg_unset", setEnv: func(t *testing.T) {}, goos: "darwin"},
+		{
+			name: "xdg_unset",
+			setEnv: func(t *testing.T) string {
+				return filepath.Join(os.Getenv("HOME"), ".local", "share", "tt")
+			},
+			goos: "darwin",
+		},
 		{
 			name: "xdg_set",
-			setEnv: func(t *testing.T) {
-				t.Setenv("XDG_DATA_HOME", t.TempDir())
+			setEnv: func(t *testing.T) string {
+				dir := t.TempDir()
+				t.Setenv("XDG_DATA_HOME", dir)
+
+				return filepath.Join(dir, "tt")
 			},
 			goos: "darwin",
 		},
 		{
 			name: "windows",
-			setEnv: func(t *testing.T) {
-				t.Setenv("LOCALAPPDATA", t.TempDir())
+			setEnv: func(t *testing.T) string {
+				dir := t.TempDir()
+				t.Setenv("LOCALAPPDATA", dir)
+
+				return filepath.Join(dir, "tt")
 			},
 			goos: "windows",
 		},
@@ -131,7 +143,7 @@ func TestDBFilePathPerOS_EmptyOverride(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			envReset(t)
-			tc.setEnv(t)
+			defaultDir := tc.setEnv(t)
 			t.Setenv("TT_DB", "")
 
 			got, err := dbFilePathPerOS(tc.goos)
@@ -149,18 +161,8 @@ func TestDBFilePathPerOS_EmptyOverride(t *testing.T) {
 
 			// An empty TT_DB is not a request for the default, so the default
 			// data directory must not be created
-			defaults := []string{
-				filepath.Join(os.Getenv("HOME"), ".local", "share", "tt"),
-				filepath.Join(os.Getenv("XDG_DATA_HOME"), "tt"),
-				filepath.Join(os.Getenv("LOCALAPPDATA"), "tt"),
-			}
-			for _, dir := range defaults {
-				if !filepath.IsAbs(dir) {
-					continue // that variable isn't set in this case
-				}
-				if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
-					t.Errorf("default data directory %q was created", dir)
-				}
+			if _, err := os.Stat(defaultDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("default data directory %q was created", defaultDir)
 			}
 		})
 	}

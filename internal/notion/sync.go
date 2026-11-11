@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
 )
+
+// ErrDataSourceUnusable is a sentinel error returned during a sync operation when
+// a time entries data source request fails with a 404 or 400, so that the run can be aborted
+var ErrDataSourceUnusable = errors.New("entries data source is unusable")
 
 // obj is a type alias for a map, used to construct
 // JSON requests
@@ -45,7 +50,9 @@ func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, descr
 }
 
 // FindEntryPage checks whether a page has already been created for an entry, by
-// querying a datasource and filtering by its localID. If found, the page object is returned with a true result
+// querying the entries data source for a page with a matching Local ID. If the data source
+// is not found or in the event of a bad request, a wrapped ErrDataSourceUnusable error is returned.
+// If the page is found, the page object is returned with a true result
 func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (Page, bool, error) {
 	body := obj{
 		"page_size": 1,
@@ -64,7 +71,17 @@ func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localID
 	payload := bytes.NewReader(b)
 	path := fmt.Sprintf("/data_sources/%s/query", entriesDataSourceID)
 	var qr queryResult
-	if err := c.do(ctx, http.MethodPost, path, payload, &qr); err != nil {
+	err = c.do(ctx, http.MethodPost, path, payload, &qr)
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) {
+		if cliErr.Code == clierr.NotFound {
+			return Page{}, false, &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source not found in Notion, restore or re-share", Cause: ErrDataSourceUnusable}
+		}
+		if cliErr.Code == clierr.Usage {
+			return Page{}, false, &clierr.Error{Code: clierr.Usage, Message: "entry page data source query rejected by Notion, check the Local ID property exists and is a text property", Cause: ErrDataSourceUnusable}
+		}
+	}
+	if err != nil {
 		return Page{}, false, err
 	}
 

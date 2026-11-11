@@ -11,8 +11,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultContextID is the only context in v1; more than one context is deferred
 const DefaultContextID = "00000000-0000-0000-0000-000000000000"
 
+// tryStopRunningEntry stops the running entry at endUTC, if there is one, and returns its ID.
+// It returns uuid.Nil when no entry is running, and invalid_time if endUTC isn't after its start
 func tryStopRunningEntry(ctx context.Context, tx *sql.Tx, endUTC, nowUTC time.Time, dbPath string) (uuid.UUID, error) {
 	runningEntryID, runningEntryStart, found, err := findRunningEntry(ctx, tx, dbPath)
 	if err != nil {
@@ -49,10 +52,12 @@ func tryStopRunningEntry(ctx context.Context, tx *sql.Tx, endUTC, nowUTC time.Ti
 	return runningEntryID, nil
 }
 
+// scanner is the Scan method shared by *sql.Row and *sql.Rows, so scanEntry can read either
 type scanner interface {
 	Scan(dest ...any) error
 }
 
+// scanEntryRow reads the entry with id, with its task name, inside tx
 func scanEntryRow(ctx context.Context, tx *sql.Tx, id uuid.UUID) (Entry, error) {
 	row := tx.QueryRowContext(ctx, `
 	SELECT id,
@@ -72,6 +77,7 @@ func scanEntryRow(ctx context.Context, tx *sql.Tx, id uuid.UUID) (Entry, error) 
 	return scanEntry(row)
 }
 
+// scanEntry reads one entry from a row selected with the columns scanEntryRow uses
 func scanEntry(s scanner) (Entry, error) {
 	var entry Entry
 	var startUTCStr string
@@ -88,7 +94,7 @@ func scanEntry(s scanner) (Entry, error) {
 		&updatedAtUTCStr,
 	)
 	if err != nil {
-		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "unable to scan row from entries", Cause: err}
+		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "unable to scan row from entries: " + err.Error(), Cause: err}
 	}
 
 	entry.StartUTC, err = FromDBString(startUTCStr)
@@ -109,6 +115,7 @@ func scanEntry(s scanner) (Entry, error) {
 	return entry, nil
 }
 
+// findRunningEntry returns the entry that has no end time, if there is one
 func findRunningEntry(ctx context.Context, tx *sql.Tx, dbPath string) (id uuid.UUID, start time.Time, found bool, err error) {
 	var runningEntryID uuid.UUID
 	startUTCStr := ""

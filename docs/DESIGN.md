@@ -280,7 +280,8 @@ Before creating a row for an entry with no `entry_page_id`, query by `Local ID`,
 | Network-level, mid-run | Retry with backoff and jitter. 3 consecutive failures (counted across entries, reset by any success) stop the run: remaining entries stay `pending`, exit 6 with synced/pending counts. |
 | 429, 5xx | Backoff with jitter, honouring `Retry-After`; 5 attempts, then `failed` (`rate_limited` / `server_error`). A 429 pauses the whole run. Stay under ~3 req/s. |
 | 401 | Abort: token invalid. |
-| 403/404 on the entries database | Abort: say which page to re-share. |
+| 403/404 on the entries database | Abort: say which page to re-share. A 404 on creating or updating a row could also be the row itself, so the data source is checked again first: only a missing or trashed data source aborts. |
+| 400 on the `Local ID` lookup | Abort: `usage`, exit 2. The query is the same for every entry, so each would fail the same way; usually the `Local ID` property is missing or isn't text. |
 | 404 on an entry's task | `blocked` (`task_not_found`); continue. |
 | Entry's own row deleted or trashed | `blocked` (`row_missing`), never silently recreated. Updating a trashed page returns 400, not 404, so on a 400 for an entry with a page ID, retrieve the page: trashed is `row_missing`, otherwise `bad_request`. |
 | Other 400 | `blocked` (`bad_request`); continue. |

@@ -1,6 +1,11 @@
 package cli
 
 import (
+	"os"
+	"time"
+
+	"github.com/aims519/timetrack-notion/internal/clierr"
+	"github.com/aims519/timetrack-notion/internal/notion"
 	"github.com/aims519/timetrack-notion/internal/sync"
 	"github.com/spf13/cobra"
 )
@@ -13,7 +18,14 @@ func newSyncCmd(a *app) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lockFilePath := syncLockFilePath(a.dbFilePath)
 
-			return sync.Run(cmd.Context(), lockFilePath)
+			token := os.Getenv("NOTION_TOKEN")
+
+			if token == "" {
+				return &clierr.Error{Code: clierr.NoToken, Message: "notion API token not found, make sure NOTION_TOKEN is set"}
+			}
+			notionClient := notion.NewClient(a.notionBaseURL, token, a.notionHTTPClient)
+
+			return sync.Run(cmd.Context(), a.db, notionClient, &syncClock{}, lockFilePath)
 		},
 	}
 
@@ -28,4 +40,10 @@ func newSyncCmd(a *app) *cobra.Command {
 //	lockPath := /some/path/tt.db.lock
 func syncLockFilePath(dbPath string) string {
 	return dbPath + ".lock"
+}
+
+type syncClock struct{}
+
+func (c *syncClock) NowUTC() time.Time {
+	return time.Now().UTC()
 }

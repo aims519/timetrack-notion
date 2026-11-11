@@ -88,7 +88,7 @@ func scanEntry(s scanner) (Entry, error) {
 		&updatedAtUTCStr,
 	)
 	if err != nil {
-		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "unable to scan row from entries", Cause: err}
+		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "unable to scan row from entries: " + err.Error(), Cause: err}
 	}
 
 	entry.StartUTC, err = FromDBString(startUTCStr)

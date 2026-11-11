@@ -147,8 +147,9 @@ func TestRun_Sync_CreatesEntryPage(t *testing.T) {
 	seedAttachTask(t, dbPath)
 
 	s, requested := fakeNotion(t, map[string]notionResponse{
-		entriesQueryPath: {http.StatusOK, `{"object": "list", "results": [], "has_more": false, "next_cursor": null}`},
-		pagesPath:        {http.StatusOK, `{"object": "page", "id": "entry-page-1"}`},
+		entriesDataSourcePath: entriesLinkedTo("tasks-ds"),
+		entriesQueryPath:      {http.StatusOK, `{"object": "list", "results": [], "has_more": false, "next_cursor": null}`},
+		pagesPath:             {http.StatusOK, `{"object": "page", "id": "entry-page-1"}`},
 	})
 
 	steps := [][]string{
@@ -170,8 +171,8 @@ func TestRun_Sync_CreatesEntryPage(t *testing.T) {
 		t.Fatalf("sync = %d, want 0 (stderr: %q)", code, stderr)
 	}
 
-	// Looked up by Local ID, then created (§6.2)
-	if got, want := requested(), []string{entriesQueryPath, pagesPath}; !slices.Equal(got, want) {
+	// The data source is checked, then the entry is looked up by Local ID and created (§6.2, §6.3)
+	if got, want := requested(), []string{entriesDataSourcePath, entriesQueryPath, pagesPath}; !slices.Equal(got, want) {
 		t.Errorf("sync requested %v, want %v", got, want)
 	}
 	if got := runStatus(t).Counts.Pending; got != 0 {
@@ -179,26 +180,61 @@ func TestRun_Sync_CreatesEntryPage(t *testing.T) {
 	}
 }
 
-// A rejected token or a rate limit stops the run as a failed command, and the entry stays
-// pending for the next run (§6.3, §8)
+// A rejected token, a missing entries data source or a rate limit stops the run as a failed
+// command, and the entry stays pending for the next run (§6.3, §8)
 func TestRun_Sync_AbortsRun(t *testing.T) {
+	var (
+		dataSourceOK  = entriesLinkedTo("tasks-ds")
+		unauthorized  = notionResponse{http.StatusUnauthorized, `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`}
+		rateLimited   = notionResponse{http.StatusTooManyRequests, `{"object": "error", "status": 429, "code": "rate_limited", "message": "Rate limited"}`}
+		notFoundError = notionResponse{http.StatusNotFound, `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find data source."}`}
+	)
+
 	tests := []struct {
-		name     string
-		response notionResponse
-		wantExit int
-		wantCode clierr.ErrorCode
+		name          string
+		responses     map[string]notionResponse
+		wantRequested []string
+		wantExit      int
+		wantCode      clierr.ErrorCode
 	}{
 		{
-			name:     "access_denied",
-			response: notionResponse{http.StatusUnauthorized, `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`},
-			wantExit: 5,
-			wantCode: clierr.AccessDenied,
+			// A bad token fails the data source check, before any entry
+			name:          "access_denied",
+			responses:     map[string]notionResponse{entriesDataSourcePath: unauthorized},
+			wantRequested: []string{entriesDataSourcePath},
+			wantExit:      5,
+			wantCode:      clierr.AccessDenied,
 		},
 		{
-			name:     "rate_limited",
-			response: notionResponse{http.StatusTooManyRequests, `{"object": "error", "status": 429, "code": "rate_limited", "message": "Rate limited"}`},
-			wantExit: 6,
-			wantCode: clierr.Offline,
+			// Un-shared or deleted before the run (§6.3)
+			name:          "data_source_not_found",
+			responses:     map[string]notionResponse{entriesDataSourcePath: notFoundError},
+			wantRequested: []string{entriesDataSourcePath},
+			wantExit:      3,
+			wantCode:      clierr.NotFound,
+		},
+		{
+			// Trashed, which Notion still answers with a 200 (decision 25)
+			name:          "data_source_in_trash",
+			responses:     map[string]notionResponse{entriesDataSourcePath: entriesSchema(true, titleProperty("Title"), relationProperty("Task", "tasks-ds"))},
+			wantRequested: []string{entriesDataSourcePath},
+			wantExit:      3,
+			wantCode:      clierr.NotFound,
+		},
+		{
+			// Un-shared after the check, so the lookup is the first to see it
+			name:          "data_source_gone_during_run",
+			responses:     map[string]notionResponse{entriesDataSourcePath: dataSourceOK, entriesQueryPath: notFoundError},
+			wantRequested: []string{entriesDataSourcePath, entriesQueryPath},
+			wantExit:      3,
+			wantCode:      clierr.NotFound,
+		},
+		{
+			name:          "rate_limited",
+			responses:     map[string]notionResponse{entriesDataSourcePath: dataSourceOK, entriesQueryPath: rateLimited},
+			wantRequested: []string{entriesDataSourcePath, entriesQueryPath},
+			wantExit:      6,
+			wantCode:      clierr.Offline,
 		},
 	}
 
@@ -207,7 +243,7 @@ func TestRun_Sync_AbortsRun(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			seedAttachTask(t, dbPath)
 
-			s, requested := fakeNotion(t, map[string]notionResponse{entriesQueryPath: tc.response})
+			s, requested := fakeNotion(t, tc.responses)
 
 			steps := [][]string{
 				{"start", "writing tests", "--task", attachTaskID, "--at", "2026-01-01T09:00:00Z"},
@@ -226,8 +262,8 @@ func TestRun_Sync_AbortsRun(t *testing.T) {
 			}
 			checkErrorDocument(t, stdout, stderr, tc.wantCode)
 
-			if got, want := requested(), []string{entriesQueryPath}; !slices.Equal(got, want) {
-				t.Errorf("sync requested %v, want %v", got, want)
+			if got := requested(); !slices.Equal(got, tc.wantRequested) {
+				t.Errorf("sync requested %v, want %v", got, tc.wantRequested)
 			}
 			if got := runStatus(t).Counts.Pending; got != 1 {
 				t.Errorf("pending after sync = %d, want 1", got)

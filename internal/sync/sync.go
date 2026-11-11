@@ -41,6 +41,22 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 	if err != nil {
 		return err
 	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	// Check data source exists, abort if not
+	ds, err := m.GetDataSource(ctx, *notionContext.EntriesDataSourceID)
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) && cliErr.Code == clierr.NotFound {
+		return &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source not found in Notion, restore or re-share", Cause: err}
+	}
+	if err != nil {
+		return err
+	}
+	if ds.InTrash {
+		return &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source trashed in Notion, restore or init"}
+	}
 
 	// Create/Update entry pages
 	for _, p := range pending {
@@ -68,6 +84,7 @@ type clock interface {
 // notionEntryManager is an interface that allows for testability of sync package functions
 // without requiring a real Notion client
 type notionEntryManager interface {
+	GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error)
 	FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (notion.Page, bool, error)
 	CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
 	UpdateEntryPage(ctx context.Context, pageID, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
@@ -131,6 +148,11 @@ func handleSyncError(err error) (syncResult, error) {
 	var tooManyReq *notion.TooManyRequestsError
 	if errors.As(err, &tooManyReq) {
 		return syncResult{}, &clierr.Error{Code: clierr.Offline, Message: "notion unresponsive, too many requests", Cause: err}
+	}
+
+	var dataSourceNotFound *notion.DataSourceNotFoundError
+	if errors.As(err, &dataSourceNotFound) {
+		return syncResult{}, &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source not found in Notion, restore or re-share", Cause: err}
 	}
 
 	var cliErr *clierr.Error

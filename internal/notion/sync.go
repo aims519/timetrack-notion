@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -45,7 +46,8 @@ func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, descr
 }
 
 // FindEntryPage checks whether a page has already been created for an entry, by
-// querying a datasource and filtering by its localID. If found, the page object is returned with a true result
+// querying a datasource and filtering by its localID. The datasource is not found, a DataSourceNotFoundError is returned.
+// If the page is found, the page object is returned with a true result
 func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (Page, bool, error) {
 	body := obj{
 		"page_size": 1,
@@ -64,7 +66,12 @@ func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localID
 	payload := bytes.NewReader(b)
 	path := fmt.Sprintf("/data_sources/%s/query", entriesDataSourceID)
 	var qr queryResult
-	if err := c.do(ctx, http.MethodPost, path, payload, &qr); err != nil {
+	err = c.do(ctx, http.MethodPost, path, payload, &qr)
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) && cliErr.Code == clierr.NotFound {
+		return Page{}, false, &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source not found in Notion, restore or reshare", Cause: &DataSourceNotFoundError{DataSourceID: entriesDataSourceID}}
+	}
+	if err != nil {
 		return Page{}, false, err
 	}
 

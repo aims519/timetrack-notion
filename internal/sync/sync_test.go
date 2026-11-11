@@ -56,17 +56,29 @@ type entryPageCall struct {
 // fakeEntryManager answers lookups from foundPages and creates pages with createdPageID. Errors
 // are keyed by local ID, so one entry can fail while another succeeds
 type fakeEntryManager struct {
-	foundPages    map[string]notion.Page // FindEntryPage results, by local ID
-	createdPageID string
-	findErr       map[string]error
-	createErr     map[string]error
-	onCreate      func(localID string) // runs during each create, before it returns
-	updateErr     map[string]error
+	dataSourceErr     error                  // returned by GetDataSource
+	dataSourceInTrash bool                   // GetDataSource reports the data source as trashed
+	foundPages        map[string]notion.Page // FindEntryPage results, by local ID
+	createdPageID     string
+	findErr           map[string]error
+	createErr         map[string]error
+	onCreate          func(localID string) // runs during each create, before it returns
+	updateErr         map[string]error
 
-	finds   []string // local IDs looked up
-	creates []entryPageCall
-	updates []entryPageCall
-	trashes []string
+	dataSources []string // data source IDs checked
+	finds       []string // local IDs looked up
+	creates     []entryPageCall
+	updates     []entryPageCall
+	trashes     []string
+}
+
+func (f *fakeEntryManager) GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error) {
+	f.dataSources = append(f.dataSources, dataSourceID)
+	if f.dataSourceErr != nil {
+		return notion.DataSource{}, f.dataSourceErr
+	}
+
+	return notion.DataSource{ID: dataSourceID, InTrash: f.dataSourceInTrash}, nil
 }
 
 func (f *fakeEntryManager) FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (notion.Page, bool, error) {
@@ -107,7 +119,7 @@ func (f *fakeEntryManager) TrashEntryPage(ctx context.Context, pageID, dataSourc
 
 // requests counts every Notion request the fake has answered
 func (f *fakeEntryManager) requests() int {
-	return len(f.finds) + len(f.creates) + len(f.updates) + len(f.trashes)
+	return len(f.dataSources) + len(f.finds) + len(f.creates) + len(f.updates) + len(f.trashes)
 }
 
 // openSyncStore opens a store in a temp directory with one cached task. With connected set,
@@ -541,6 +553,99 @@ func TestRun_AbortsRun(t *testing.T) {
 	}
 }
 
+// dataSourceNotFound is the error the client returns when a lookup's data source is gone
+var dataSourceNotFound = &clierr.Error{
+	Code:    clierr.NotFound,
+	Message: "data source not found in entry page lookup",
+	Cause:   &notion.DataSourceNotFoundError{DataSourceID: testEntriesDataSourceID},
+}
+
+// The entries data source is checked once, before any entry, and a failure stops the run with
+// every entry left as it was (§6.3)
+func TestRun_DataSourceCheck(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		inTrash  bool
+		wantCode clierr.ErrorCode // empty when the check passes
+	}{
+		{name: "found"},
+		// A trashed database still answers 200, so entries would be written into the trash (decision 25)
+		{name: "in_trash", inTrash: true, wantCode: clierr.NotFound},
+		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantCode: clierr.NotFound},
+		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
+		{name: "offline", err: &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"}, wantCode: clierr.Offline},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			entry := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			m := &fakeEntryManager{dataSourceErr: tc.err, dataSourceInTrash: tc.inTrash, createdPageID: "page-1"}
+
+			err := Run(t.Context(), st, m, runClock(0), lockPath)
+
+			if len(m.dataSources) != 1 || m.dataSources[0] != testEntriesDataSourceID {
+				t.Errorf("GetDataSource IDs = %v, want [%s]", m.dataSources, testEntriesDataSourceID)
+			}
+
+			if tc.wantCode == "" {
+				if err != nil {
+					t.Fatalf("Run() = %v, want nil", err)
+				}
+				checkStored(t, st, entry.ID, "synced", "page-1")
+				return
+			}
+
+			checkCode(t, err, tc.wantCode)
+			if n := len(m.finds) + len(m.creates) + len(m.updates); n != 0 {
+				t.Errorf("Run() made %d entry requests after a failed check, want 0", n)
+			}
+			checkStored(t, st, entry.ID, "pending", "")
+		})
+	}
+}
+
+// With nothing to sync, the run makes no Notion requests at all
+func TestRun_NothingPending_NoRequests(t *testing.T) {
+	st, lockPath := openSyncStore(t, true)
+
+	// A running entry is held back, so there is nothing to push
+	taskID := testTaskID
+	if _, err := st.StartNewTimer(t.Context(), testStart, &taskID, nil); err != nil {
+		t.Fatalf("StartNewTimer(): %v", err)
+	}
+	m := &fakeEntryManager{}
+
+	if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+	if n := m.requests(); n != 0 {
+		t.Errorf("Run() made %d Notion requests, want 0", n)
+	}
+}
+
+// A data source that disappears mid-run stops it at the next lookup, rather than blocking every
+// entry in turn
+func TestRun_DataSourceGoneDuringRun(t *testing.T) {
+	st, lockPath := openSyncStore(t, true)
+	first := seedStoppedEntry(t, st, nil, testStart, testEnd)
+	second := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
+	m := &fakeEntryManager{findErr: map[string]error{first.ID: dataSourceNotFound, second.ID: dataSourceNotFound}}
+
+	err := Run(t.Context(), st, m, runClock(0), lockPath)
+
+	checkCode(t, err, clierr.NotFound)
+	if len(m.finds) != 1 {
+		t.Errorf("FindEntryPage called %d times, want 1", len(m.finds))
+	}
+	if len(m.creates) != 0 {
+		t.Errorf("CreateEntryPage called %d times, want 0", len(m.creates))
+	}
+	checkStored(t, st, first.ID, "pending", "")
+	checkStored(t, st, second.ID, "pending", "")
+}
+
 func TestHandleSyncError(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -554,6 +659,7 @@ func TestHandleSyncError(t *testing.T) {
 			wantCode: clierr.Offline,
 		},
 		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
+		{name: "data_source_not_found", err: dataSourceNotFound, wantCode: clierr.NotFound},
 		{name: "bad_request", err: &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}, wantState: "blocked"},
 		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantState: "blocked"},
 		{name: "server_error", err: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantState: "failed"},

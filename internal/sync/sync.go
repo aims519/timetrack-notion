@@ -46,16 +46,9 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 	}
 
 	// Check data source exists, abort if not
-	ds, err := m.GetDataSource(ctx, *notionContext.EntriesDataSourceID)
-	var cliErr *clierr.Error
-	if errors.As(err, &cliErr) && cliErr.Code == clierr.NotFound {
-		return &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source not found in Notion, restore or re-share", Cause: err}
-	}
+	err = checkDataSource(ctx, m, *notionContext.EntriesDataSourceID)
 	if err != nil {
 		return err
-	}
-	if ds.InTrash {
-		return &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source trashed in Notion, restore or init"}
 	}
 
 	// Create/Update entry pages
@@ -122,18 +115,13 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 		}
 	}
 
-	// Update existing page
 	if entryPageID != nil {
-		_, err := m.UpdateEntryPage(ctx, *entryPageID, entriesDataSourceID, title, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
-		if err != nil {
-			return handleSyncError(err)
-		}
-	} else { // create new page
-		createdPage, err := m.CreateEntryPage(ctx, entriesDataSourceID, title, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
-		if err != nil {
-			return handleSyncError(err)
-		}
-		entryPageID = &createdPage.ID
+		err = updatePage(ctx, m, entriesDataSourceID, *entryPageID, title, description, e)
+	} else {
+		entryPageID, err = createPage(ctx, m, entriesDataSourceID, entryPageID, title, description, e)
+	}
+	if err != nil {
+		return handleSyncError(err)
 	}
 
 	// success case
@@ -173,6 +161,7 @@ func handleSyncError(err error) (syncResult, error) {
 	return syncResultFailed(err.Error()), nil
 }
 
+// syncResult represents the result of syncing a single local time entry
 type syncResult struct {
 	EntryPageID *string
 	Status      string
@@ -211,4 +200,63 @@ func syncResultBlocked(syncError string) syncResult {
 		SyncedAt:    nil,
 		SyncError:   &syncError,
 	}
+}
+
+// checkDataSource returns an error if the entries data source is missing or trashed in Notion,
+// wrapping ErrDataSourceUnusable, or if Notion couldn't be asked. At the start of a run any
+// error stops the run; after a page 404 the error goes through handleSyncError
+func checkDataSource(ctx context.Context, m notionEntryManager, dataSourceID string) error {
+	ds, err := m.GetDataSource(ctx, dataSourceID)
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) && cliErr.Code == clierr.NotFound {
+		return &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source not found in Notion, restore or re-share", Cause: notion.ErrDataSourceUnusable}
+	}
+	if err != nil {
+		return err
+	}
+	if ds.InTrash {
+		return &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source trashed in Notion, restore or init", Cause: notion.ErrDataSourceUnusable}
+	}
+
+	return nil
+}
+
+// createPage creates a Notion page for an entry and returns its ID. A 404 could mean the data
+// source is gone, so it's checked again: if the check fails, that error is returned instead
+// of the 404
+func createPage(ctx context.Context, m notionEntryManager, entriesDataSourceID string, entryPageID *string, title, description string, e store.Entry) (*string, error) {
+	createdPage, err := m.CreateEntryPage(ctx, entriesDataSourceID, title, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
+
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) && cliErr.Code == clierr.NotFound {
+		if err := checkDataSource(ctx, m, entriesDataSourceID); err != nil {
+			return nil, err
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &createdPage.ID, nil
+}
+
+// updatePage updates an entry's existing Notion page. A 404 could mean the data source is gone
+// or the entry's own page was deleted, so the data source is checked again: if the check
+// fails, that error is returned instead of the 404
+func updatePage(ctx context.Context, m notionEntryManager, entriesDataSourceID string, entryPageID string, title, description string, e store.Entry) error {
+	_, err := m.UpdateEntryPage(ctx, entryPageID, entriesDataSourceID, title, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
+
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) && cliErr.Code == clierr.NotFound {
+		if err := checkDataSource(ctx, m, entriesDataSourceID); err != nil {
+			return err
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

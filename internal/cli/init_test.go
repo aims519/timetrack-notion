@@ -77,20 +77,39 @@ func requestCount(paths []string, path string) int {
 func fakeNotion(t *testing.T, responses map[string]notionResponse) (*httptest.Server, func() []string) {
 	t.Helper()
 
+	sequences := make(map[string][]notionResponse, len(responses))
+	for path, res := range responses {
+		sequences[path] = []notionResponse{res}
+	}
+	return fakeNotionSequence(t, sequences)
+}
+
+// fakeNotionSequence is fakeNotion for a path that answers differently each time: each request
+// gets the next response for its path, and the last one repeats once they run out
+func fakeNotionSequence(t *testing.T, responses map[string][]notionResponse) (*httptest.Server, func() []string) {
+	t.Helper()
+
 	// The handler runs on the server's goroutine, so the paths need a lock
 	var mu sync.Mutex
 	var paths []string
+	counts := make(map[string]int)
 
 	s := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		paths = append(paths, r.URL.Path)
+		n := counts[r.URL.Path]
+		counts[r.URL.Path]++
 		mu.Unlock()
 
 		if got, want := r.Header.Get("Authorization"), "Bearer "+initTestToken; got != want {
 			t.Errorf("Authorization header = %q, want %q", got, want)
 		}
 
-		res, ok := responses[r.URL.Path]
+		var res notionResponse
+		sequence, ok := responses[r.URL.Path]
+		if ok {
+			res = sequence[min(n, len(sequence)-1)]
+		}
 		if !ok && r.URL.Path == usersMePath {
 			res, ok = tokenValid, true
 		}

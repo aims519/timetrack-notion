@@ -58,6 +58,8 @@ type entryPageCall struct {
 type fakeEntryManager struct {
 	dataSourceErr     error                  // returned by GetDataSource
 	dataSourceInTrash bool                   // GetDataSource reports the data source as trashed
+	recheckErr        error                  // returned by every GetDataSource after the first
+	recheckInTrash    bool                   // every GetDataSource after the first reports it trashed
 	foundPages        map[string]notion.Page // FindEntryPage results, by local ID
 	createdPageID     string
 	findErr           map[string]error
@@ -74,6 +76,12 @@ type fakeEntryManager struct {
 
 func (f *fakeEntryManager) GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error) {
 	f.dataSources = append(f.dataSources, dataSourceID)
+	if len(f.dataSources) > 1 {
+		if f.recheckErr != nil {
+			return notion.DataSource{}, f.recheckErr
+		}
+		return notion.DataSource{ID: dataSourceID, InTrash: f.recheckInTrash}, nil
+	}
 	if f.dataSourceErr != nil {
 		return notion.DataSource{}, f.dataSourceErr
 	}
@@ -572,15 +580,16 @@ var (
 // every entry left as it was (§6.3)
 func TestRun_DataSourceCheck(t *testing.T) {
 	tests := []struct {
-		name     string
-		err      error
-		inTrash  bool
-		wantCode clierr.ErrorCode // empty when the check passes
+		name         string
+		err          error
+		inTrash      bool
+		wantCode     clierr.ErrorCode // empty when the check passes
+		wantUnusable bool             // wraps ErrDataSourceUnusable, so a re-check mid-run also stops
 	}{
 		{name: "found"},
 		// A trashed database still answers 200, so entries would be written into the trash (decision 25)
-		{name: "in_trash", inTrash: true, wantCode: clierr.NotFound},
-		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantCode: clierr.NotFound},
+		{name: "in_trash", inTrash: true, wantCode: clierr.NotFound, wantUnusable: true},
+		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantCode: clierr.NotFound, wantUnusable: true},
 		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
 		{name: "offline", err: &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"}, wantCode: clierr.Offline},
 	}
@@ -606,6 +615,9 @@ func TestRun_DataSourceCheck(t *testing.T) {
 			}
 
 			checkCode(t, err, tc.wantCode)
+			if got := errors.Is(err, notion.ErrDataSourceUnusable); got != tc.wantUnusable {
+				t.Errorf("errors.Is(err, ErrDataSourceUnusable) = %v, want %v", got, tc.wantUnusable)
+			}
 			if n := len(m.finds) + len(m.creates) + len(m.updates); n != 0 {
 				t.Errorf("Run() made %d entry requests after a failed check, want 0", n)
 			}
@@ -663,6 +675,84 @@ func TestRun_DataSourceUnusableDuringRun(t *testing.T) {
 			}
 			checkStored(t, st, first.ID, "pending", "")
 			checkStored(t, st, second.ID, "pending", "")
+		})
+	}
+}
+
+// A 404 on a create or update could be the data source or the entry's own page, so the data source
+// is checked again. If it's gone the run stops; if it's fine only that entry is blocked (§6.3)
+func TestRun_PageNotFound_RechecksDataSource(t *testing.T) {
+	pageNotFound := &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}
+
+	tests := []struct {
+		name           string
+		onUpdate       bool // the entry has a page in Notion, so the update gets the 404
+		recheckErr     error
+		recheckInTrash bool
+		wantCode       clierr.ErrorCode // empty when the run carries on
+		wantFirstState string           // the first entry's state when the run carries on
+	}{
+		{name: "create_data_source_gone", recheckErr: pageNotFound, wantCode: clierr.NotFound},
+		{name: "create_data_source_trashed", recheckInTrash: true, wantCode: clierr.NotFound},
+		{name: "create_data_source_fine", wantFirstState: "blocked"},
+		{name: "update_data_source_gone", onUpdate: true, recheckErr: pageNotFound, wantCode: clierr.NotFound},
+		{name: "update_data_source_trashed", onUpdate: true, recheckInTrash: true, wantCode: clierr.NotFound},
+		{name: "update_data_source_fine", onUpdate: true, wantFirstState: "blocked"},
+		{
+			name:       "recheck_offline",
+			recheckErr: &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"},
+			wantCode:   clierr.Offline,
+		},
+		{name: "recheck_access_denied", recheckErr: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
+		{
+			// The re-check couldn't tell, so the entry is retried next run rather than blocked
+			name:           "recheck_server_error",
+			recheckErr:     &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"},
+			wantFirstState: "failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			first := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			second := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
+
+			m := &fakeEntryManager{
+				createdPageID:  "page-second",
+				recheckErr:     tc.recheckErr,
+				recheckInTrash: tc.recheckInTrash,
+			}
+			if tc.onUpdate {
+				// The lookup finds both pages, so each entry is updated rather than created
+				m.foundPages = map[string]notion.Page{first.ID: {ID: "page-first"}, second.ID: {ID: "page-second"}}
+				m.updateErr = map[string]error{first.ID: pageNotFound}
+			} else {
+				m.createErr = map[string]error{first.ID: pageNotFound}
+			}
+
+			err := Run(t.Context(), st, m, runClock(0), lockPath)
+
+			// Once at the start of the run, and once after the 404
+			if len(m.dataSources) != 2 {
+				t.Errorf("GetDataSource called %d times, want 2", len(m.dataSources))
+			}
+
+			if tc.wantCode != "" {
+				checkCode(t, err, tc.wantCode)
+				if n := len(m.creates) + len(m.updates); n != 1 {
+					t.Errorf("made %d creates and updates, want 1", n)
+				}
+				checkStored(t, st, first.ID, "pending", "")
+				checkStored(t, st, second.ID, "pending", "")
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Run() = %v, want nil", err)
+			}
+			checkStored(t, st, first.ID, tc.wantFirstState, "")
+			checkStored(t, st, second.ID, "synced", "page-second")
 		})
 	}
 }

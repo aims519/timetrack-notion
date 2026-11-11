@@ -281,3 +281,69 @@ func TestRun_Sync_AbortsRun(t *testing.T) {
 		})
 	}
 }
+
+// A 404 on a create or update checks the data source again: gone stops the run, and found blocks
+// only that entry (§6.3)
+func TestRun_Sync_PageNotFound_RechecksDataSource(t *testing.T) {
+	var (
+		dataSourceOK  = entriesLinkedTo("tasks-ds")
+		emptyQuery    = notionResponse{http.StatusOK, `{"object": "list", "results": [], "has_more": false, "next_cursor": null}`}
+		foundQuery    = notionResponse{http.StatusOK, `{"object": "list", "results": [{"object": "page", "id": "entry-page-1"}], "has_more": false, "next_cursor": null}`}
+		notFoundError = notionResponse{http.StatusNotFound, `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find object."}`}
+	)
+
+	tests := []struct {
+		name        string
+		query       notionResponse // the lookup by Local ID decides create or update
+		pagePath    string
+		recheck     notionResponse
+		wantExit    int
+		wantCode    clierr.ErrorCode
+		wantPending int
+	}{
+		{name: "create_data_source_gone", query: emptyQuery, pagePath: pagesPath, recheck: notFoundError, wantExit: 3, wantCode: clierr.NotFound, wantPending: 1},
+		{name: "create_data_source_fine", query: emptyQuery, pagePath: pagesPath, recheck: dataSourceOK, wantExit: 0, wantPending: 0},
+		{name: "update_data_source_gone", query: foundQuery, pagePath: pagesPath + "/entry-page-1", recheck: notFoundError, wantExit: 3, wantCode: clierr.NotFound, wantPending: 1},
+		{name: "update_data_source_fine", query: foundQuery, pagePath: pagesPath + "/entry-page-1", recheck: dataSourceOK, wantExit: 0, wantPending: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			seedAttachTask(t, dbPath)
+
+			s, requested := fakeNotionSequence(t, map[string][]notionResponse{
+				entriesDataSourcePath: {dataSourceOK, tc.recheck},
+				entriesQueryPath:      {tc.query},
+				tc.pagePath:           {notFoundError},
+			})
+
+			steps := [][]string{
+				{"start", "writing tests", "--task", attachTaskID, "--at", "2026-01-01T09:00:00Z"},
+				{"stop", "--at", "2026-01-01T10:00:00Z"},
+			}
+			for _, args := range steps {
+				code, _, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), args...)
+				if code != 0 {
+					t.Fatalf("%s = %d, want 0 (stderr: %q)", args[0], code, stderr)
+				}
+			}
+
+			code, stdout, stderr := runAgainstNotion(t, dbPath, s.URL, s.Client(), "sync")
+			if code != tc.wantExit {
+				t.Fatalf("sync = %d, want %d (stderr: %q)", code, tc.wantExit, stderr)
+			}
+			if tc.wantExit != 0 {
+				checkErrorDocument(t, stdout, stderr, tc.wantCode)
+			}
+
+			want := []string{entriesDataSourcePath, entriesDataSourcePath, entriesQueryPath, tc.pagePath}
+			if got := requested(); !slices.Equal(got, want) {
+				t.Errorf("sync requested %v, want %v", got, want)
+			}
+			if got := runStatus(t).Counts.Pending; got != tc.wantPending {
+				t.Errorf("pending after sync = %d, want %d", got, tc.wantPending)
+			}
+		})
+	}
+}

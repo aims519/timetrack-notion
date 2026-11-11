@@ -326,6 +326,7 @@ func TestCreateEntryPage_ErrorResponse_ReturnsCLIError(t *testing.T) {
 		wantCode clierr.ErrorCode
 	}{
 		{
+			// Also what Notion returns for an invalid task relation
 			name:     "bad request",
 			status:   http.StatusBadRequest,
 			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "body failed validation"}`,

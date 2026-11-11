@@ -42,8 +42,10 @@ func syncLockFilePath(dbPath string) string {
 	return dbPath + ".lock"
 }
 
+// syncClock gives sync the real time, in UTC
 type syncClock struct{}
 
+// NowUTC returns the current time in UTC
 func (c *syncClock) NowUTC() time.Time {
 	return time.Now().UTC()
 }

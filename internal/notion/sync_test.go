@@ -605,12 +605,17 @@ func TestFindEntryPage_ErrorResponse_ReturnsCLIError(t *testing.T) {
 		status   int
 		body     string
 		wantCode clierr.ErrorCode
+		// The lookup queries the data source, not a page, so a 400 or 404 is about the data
+		// source and wraps ErrDataSourceUnusable for sync to stop the run
+		wantUnusable bool
 	}{
 		{
-			name:     "bad request",
-			status:   http.StatusBadRequest,
-			body:     `{"object": "error", "status": 400, "code": "validation_error", "message": "body failed validation"}`,
-			wantCode: clierr.Usage,
+			// What Notion returns when the Local ID property is missing or the wrong type, too
+			name:         "bad request",
+			status:       http.StatusBadRequest,
+			body:         `{"object": "error", "status": 400, "code": "validation_error", "message": "body failed validation"}`,
+			wantCode:     clierr.Usage,
+			wantUnusable: true,
 		},
 		{
 			name:     "invalid token",
@@ -620,10 +625,11 @@ func TestFindEntryPage_ErrorResponse_ReturnsCLIError(t *testing.T) {
 		},
 		{
 			// What Notion returns for a data source that isn't shared with the integration, too
-			name:     "data source not found",
-			status:   http.StatusNotFound,
-			body:     `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find data source."}`,
-			wantCode: clierr.NotFound,
+			name:         "data source not found",
+			status:       http.StatusNotFound,
+			body:         `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find data source."}`,
+			wantCode:     clierr.NotFound,
+			wantUnusable: true,
 		},
 		{
 			name:     "server error",
@@ -681,6 +687,10 @@ func TestFindEntryPage_ErrorResponse_ReturnsCLIError(t *testing.T) {
 
 			if ce.Code != tc.wantCode {
 				t.Errorf("error code = %q, want %q", ce.Code, tc.wantCode)
+			}
+
+			if got := errors.Is(err, ErrDataSourceUnusable); got != tc.wantUnusable {
+				t.Errorf("errors.Is(err, ErrDataSourceUnusable) = %v, want %v", got, tc.wantUnusable)
 			}
 		})
 	}

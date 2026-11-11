@@ -77,17 +77,6 @@ func (e *TooManyRequestsError) Error() string {
 	return "too many requests to Notion, no retry timing guidance available"
 }
 
-// DataSourceNotFoundError is returned during a data source query if the data source itself
-// was not found. This is singled out because it signals that a sync run should be aborted as
-// subsequent calls would receive the same response
-type DataSourceNotFoundError struct {
-	DataSourceID string
-}
-
-func (e *DataSourceNotFoundError) Error() string {
-	return fmt.Sprintf("Notion data source %q not found", e.DataSourceID)
-}
-
 func handleErrorResponse(res *http.Response, b []byte) error {
 	if res.StatusCode == http.StatusOK {
 		return nil

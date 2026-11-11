@@ -150,9 +150,8 @@ func handleSyncError(err error) (syncResult, error) {
 		return syncResult{}, &clierr.Error{Code: clierr.Offline, Message: "notion unresponsive, too many requests", Cause: err}
 	}
 
-	var dataSourceNotFound *notion.DataSourceNotFoundError
-	if errors.As(err, &dataSourceNotFound) {
-		return syncResult{}, &clierr.Error{Code: clierr.NotFound, Message: "saved entries data source not found in Notion, restore or re-share", Cause: err}
+	if errors.Is(err, notion.ErrDataSourceUnusable) {
+		return syncResult{}, err
 	}
 
 	var cliErr *clierr.Error

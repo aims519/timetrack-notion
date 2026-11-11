@@ -188,6 +188,7 @@ func TestRun_Sync_AbortsRun(t *testing.T) {
 		unauthorized  = notionResponse{http.StatusUnauthorized, `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`}
 		rateLimited   = notionResponse{http.StatusTooManyRequests, `{"object": "error", "status": 429, "code": "rate_limited", "message": "Rate limited"}`}
 		notFoundError = notionResponse{http.StatusNotFound, `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find data source."}`}
+		badRequest    = notionResponse{http.StatusBadRequest, `{"object": "error", "status": 400, "code": "validation_error", "message": "Could not find property with name or id: Local ID"}`}
 	)
 
 	tests := []struct {
@@ -228,6 +229,15 @@ func TestRun_Sync_AbortsRun(t *testing.T) {
 			wantRequested: []string{entriesDataSourcePath, entriesQueryPath},
 			wantExit:      3,
 			wantCode:      clierr.NotFound,
+		},
+		{
+			// The lookup is rejected, as when the Local ID property is missing, so every entry
+			// would fail the same way
+			name:          "lookup_rejected",
+			responses:     map[string]notionResponse{entriesDataSourcePath: dataSourceOK, entriesQueryPath: badRequest},
+			wantRequested: []string{entriesDataSourcePath, entriesQueryPath},
+			wantExit:      2,
+			wantCode:      clierr.Usage,
 		},
 		{
 			name:          "rate_limited",

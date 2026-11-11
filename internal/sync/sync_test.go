@@ -553,12 +553,20 @@ func TestRun_AbortsRun(t *testing.T) {
 	}
 }
 
-// dataSourceNotFound is the error the client returns when a lookup's data source is gone
-var dataSourceNotFound = &clierr.Error{
-	Code:    clierr.NotFound,
-	Message: "data source not found in entry page lookup",
-	Cause:   &notion.DataSourceNotFoundError{DataSourceID: testEntriesDataSourceID},
-}
+// Errors the client returns when a lookup's data source can't be used: gone (404), or
+// rejecting the query (400), as when the Local ID property is missing
+var (
+	dataSourceNotFound = &clierr.Error{
+		Code:    clierr.NotFound,
+		Message: "saved entries data source not found in Notion, restore or re-share",
+		Cause:   notion.ErrDataSourceUnusable,
+	}
+	dataSourceRejected = &clierr.Error{
+		Code:    clierr.Usage,
+		Message: "entry page data source query rejected by Notion",
+		Cause:   notion.ErrDataSourceUnusable,
+	}
+)
 
 // The entries data source is checked once, before any entry, and a failure stops the run with
 // every entry left as it was (§6.3)
@@ -625,25 +633,38 @@ func TestRun_NothingPending_NoRequests(t *testing.T) {
 	}
 }
 
-// A data source that disappears mid-run stops it at the next lookup, rather than blocking every
-// entry in turn
-func TestRun_DataSourceGoneDuringRun(t *testing.T) {
-	st, lockPath := openSyncStore(t, true)
-	first := seedStoppedEntry(t, st, nil, testStart, testEnd)
-	second := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
-	m := &fakeEntryManager{findErr: map[string]error{first.ID: dataSourceNotFound, second.ID: dataSourceNotFound}}
-
-	err := Run(t.Context(), st, m, runClock(0), lockPath)
-
-	checkCode(t, err, clierr.NotFound)
-	if len(m.finds) != 1 {
-		t.Errorf("FindEntryPage called %d times, want 1", len(m.finds))
+// A data source that can't be used stops the run at the next lookup, rather than blocking every
+// entry in turn: one that disappears mid-run, or one whose query is rejected
+func TestRun_DataSourceUnusableDuringRun(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode clierr.ErrorCode
+	}{
+		{name: "not_found", err: dataSourceNotFound, wantCode: clierr.NotFound},
+		{name: "query_rejected", err: dataSourceRejected, wantCode: clierr.Usage},
 	}
-	if len(m.creates) != 0 {
-		t.Errorf("CreateEntryPage called %d times, want 0", len(m.creates))
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			first := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			second := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
+			m := &fakeEntryManager{findErr: map[string]error{first.ID: tc.err, second.ID: tc.err}}
+
+			err := Run(t.Context(), st, m, runClock(0), lockPath)
+
+			checkCode(t, err, tc.wantCode)
+			if len(m.finds) != 1 {
+				t.Errorf("FindEntryPage called %d times, want 1", len(m.finds))
+			}
+			if len(m.creates) != 0 {
+				t.Errorf("CreateEntryPage called %d times, want 0", len(m.creates))
+			}
+			checkStored(t, st, first.ID, "pending", "")
+			checkStored(t, st, second.ID, "pending", "")
+		})
 	}
-	checkStored(t, st, first.ID, "pending", "")
-	checkStored(t, st, second.ID, "pending", "")
 }
 
 func TestHandleSyncError(t *testing.T) {
@@ -660,6 +681,7 @@ func TestHandleSyncError(t *testing.T) {
 		},
 		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
 		{name: "data_source_not_found", err: dataSourceNotFound, wantCode: clierr.NotFound},
+		{name: "data_source_query_rejected", err: dataSourceRejected, wantCode: clierr.Usage},
 		{name: "bad_request", err: &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}, wantState: "blocked"},
 		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantState: "blocked"},
 		{name: "server_error", err: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantState: "failed"},

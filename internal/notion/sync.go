@@ -13,7 +13,7 @@ import (
 )
 
 // ErrDataSourceUnusable is a sentinel error returned during a sync operation when
-// requests to Notion aren't succeeding, so that the run can be aborted
+// a time entries data source request fails with a 404 or 400, so that the run can be aborted
 var ErrDataSourceUnusable = errors.New("entries data source is unusable")
 
 // obj is a type alias for a map, used to construct
@@ -51,8 +51,8 @@ func (c *Client) CreateEntryPage(ctx context.Context, dataSourceID, title, descr
 
 // FindEntryPage checks whether a page has already been created for an entry, by
 // querying the entries data source for a page with a matching Local ID. If the data source
-// is not found, a DataSourceNotFoundError is returned. If the page is found, the page object
-// is returned with a true result
+// is not found or in the event of a bad request, a wrapped ErrDataSourceUnusable error is returned.
+// If the page is found, the page object is returned with a true result
 func (c *Client) FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (Page, bool, error) {
 	body := obj{
 		"page_size": 1,

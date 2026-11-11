@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/aims519/timetrack-notion/internal/clierr"
 )
 
 func TestRun_FlagErrors_ExitWithUsageCode(t *testing.T) {
@@ -79,13 +82,6 @@ func TestDBFilePathPerOS_Override(t *testing.T) {
 				return filePath
 			},
 		},
-		{
-			name: "env_override_empty",
-			setEnv: func(t *testing.T) string {
-				t.Setenv("TT_DB", "")
-				return ""
-			},
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,16 +97,111 @@ func TestDBFilePathPerOS_Override(t *testing.T) {
 				t.Errorf("got %q, want %q", got, want)
 			}
 
-			if want == "" {
-				return
-			}
-
 			ttDir := filepath.Dir(got)
 			_, err = os.Stat(ttDir)
 			if !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("TT_DB directory %q should not be created", ttDir)
 			}
 		})
+	}
+}
+
+func TestDBFilePathPerOS_EmptyOverride(t *testing.T) {
+	tests := []struct {
+		name   string
+		setEnv func(t *testing.T) string // returns the default data directory this case would fall back to
+		goos   string
+	}{
+		{
+			name: "xdg_unset",
+			setEnv: func(t *testing.T) string {
+				return filepath.Join(os.Getenv("HOME"), ".local", "share", "tt")
+			},
+			goos: "darwin",
+		},
+		{
+			name: "xdg_set",
+			setEnv: func(t *testing.T) string {
+				dir := t.TempDir()
+				t.Setenv("XDG_DATA_HOME", dir)
+
+				return filepath.Join(dir, "tt")
+			},
+			goos: "darwin",
+		},
+		{
+			name: "windows",
+			setEnv: func(t *testing.T) string {
+				dir := t.TempDir()
+				t.Setenv("LOCALAPPDATA", dir)
+
+				return filepath.Join(dir, "tt")
+			},
+			goos: "windows",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			envReset(t)
+			defaultDir := tc.setEnv(t)
+			t.Setenv("TT_DB", "")
+
+			got, err := dbFilePathPerOS(tc.goos)
+
+			var cliErr *clierr.Error
+			if !errors.As(err, &cliErr) {
+				t.Fatalf("dbFilePathPerOS(%q) = %q, %v, want *clierr.Error", tc.goos, got, err)
+			}
+			if cliErr.Code != clierr.DatabaseUnusable {
+				t.Errorf("error code = %q, want %q", cliErr.Code, clierr.DatabaseUnusable)
+			}
+			if got != "" {
+				t.Errorf("path = %q, want empty on error", got)
+			}
+
+			// An empty TT_DB is not a request for the default, so the default
+			// data directory must not be created
+			if _, err := os.Stat(defaultDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("default data directory %q was created", defaultDir)
+			}
+		})
+	}
+}
+
+func TestRun_EmptyTTDB_DatabaseUnusable(t *testing.T) {
+	envReset(t)
+	t.Setenv("TT_DB", "")
+
+	code, stdout, stderr := runTT(t, "status")
+	if code != 5 {
+		t.Errorf("Run(status) = %d, want 5 (stderr: %q)", code, stderr)
+	}
+
+	// A failed command must write nothing to stdout
+	if len(stdout) != 0 {
+		t.Errorf("Run(status) wrote to stdout on failure: %q", stdout)
+	}
+
+	var doc struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stderr, &doc); err != nil {
+		t.Fatalf("unable to decode error document %q: %v", stderr, err)
+	}
+	if doc.Error.Code != string(clierr.DatabaseUnusable) {
+		t.Errorf("error code want %q, got %q", clierr.DatabaseUnusable, doc.Error.Code)
+	}
+
+	// database_unusable always carries the path it tried (§8), here the empty TT_DB
+	path, ok := doc.Error.Details["path"]
+	if !ok {
+		t.Fatalf("error details want a path, got %v", doc.Error.Details)
+	}
+	if path != "" {
+		t.Errorf("error details path want %q, got %q", "", path)
 	}
 }
 

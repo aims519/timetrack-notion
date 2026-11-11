@@ -6,6 +6,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/x/term v0.2.2
+	github.com/gofrs/flock v0.13.2
 	github.com/google/uuid v1.6.0
 	github.com/pressly/goose/v3 v3.29.0
 	github.com/spf13/cobra v1.10.2
@@ -45,7 +46,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

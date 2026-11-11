@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+reviews:
+  pre_merge_checks:
+    # The built-in check counts every function in changed files, test files
+    # included, and has no path filter. Go doesn't expect doc comments on
+    # Test functions, so it's replaced by the custom check below.
+    docstrings:
+      mode: "off"
+    custom_checks:
+      - name: "Go doc comments"
+        mode: "warning"
+        instructions: |
+          Only consider .go files changed in this PR whose name does not end
+          in _test.go. Fail if any of the following, added or changed in this
+          PR, has no doc comment directly above it:
+          - an exported function, method, type, constant or variable; its
+            comment must start with the identifier's name
+          - a package added in this PR, if none of its files has a package
+            comment; the comment must start with "Package <name>"
+          Unexported identifiers don't need a doc comment. Otherwise pass.

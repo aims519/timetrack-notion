@@ -34,8 +34,8 @@ func newRootCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-
 			a.db = db
+			a.dbFilePath = dbPath
 
 			return nil
 		},
@@ -54,19 +54,14 @@ func newRootCmd(a *app) *cobra.Command {
 	rootCmd.AddCommand(newTaskCmd(a))
 	rootCmd.AddCommand(newInitCmd(a))
 	rootCmd.AddCommand(newAttachCmd(a))
+	rootCmd.AddCommand(newSyncCmd(a))
 
 	return rootCmd
 }
 
-// app holds a pointer to the db connection pool so that Run can safely close it
-type app struct {
-	db               *store.Store
-	format           *output.Format
-	notionBaseURL    string
-	notionHTTPClient *http.Client
-	noInput          bool
-}
-
+// canPrompt decides if commands should be allowed to prompt the user for input. This
+// is true if stdIn, stdOut, stdErr are terminals and the --no-input flag has not
+// been set
 func (a *app) canPrompt(in io.Reader, out, err io.Writer) bool {
 	type descriptor interface {
 		Fd() uintptr
@@ -89,6 +84,8 @@ func (a *app) canPrompt(in io.Reader, out, err io.Writer) bool {
 	return !a.noInput && inTerminal && outTerminal && errTerminal
 }
 
+// run is a testable, internal version of the Run function. Tests pass in a custom app pointer,
+// where the Run function builds it
 func run(ctx context.Context, a *app, args []string, stdout, stderr io.Writer) int {
 	root := newRootCmd(a)
 	root.SetArgs(args)
@@ -125,35 +122,53 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return run(ctx, &a, args, stdout, stderr)
 }
 
+// dbFilePathPerOS returns the file path for the tt SQLite database. This
+// can be a custom path set using the TT_DB environment variable, otherwise
+// a default directory is used
 func dbFilePathPerOS(goos string) (string, error) {
 	// Check for TT_DB override
 	val, exists := os.LookupEnv("TT_DB")
-	if exists {
+	if exists && val == "" {
+		return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "TT_DB set with an empty value, remove it or set to an actual filepath", Details: map[string]any{"path": val}}
+	} else if exists {
 		return val, nil
 	}
 
 	// target data directory
+	ttDir, err := ttDefaultDirectoryPerOS(goos)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(ttDir, "tt.db"), nil
+}
+
+// ttDefaultDirectoryPerOS returns the default directory that tt data files are stored in, e.g.
+// sync lock files and SQLite database files. The base directory is selected based on the user's
+// operating system
+func ttDefaultDirectoryPerOS(goos string) (string, error) {
 	var ttDir string
+	var home string
 
 	// Check for XDG_DATA_HOME
-	val = os.Getenv("XDG_DATA_HOME")
-	if filepath.IsAbs(val) {
-		ttDir = filepath.Join(val, "tt")
+	home = os.Getenv("XDG_DATA_HOME")
+	if filepath.IsAbs(home) {
+		ttDir = filepath.Join(home, "tt")
 
 		err := os.MkdirAll(ttDir, 0o700) // user read+write+execute
 		if err != nil {
 			return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to create default data directory", Cause: err, Details: map[string]any{"path": ttDir}}
 		}
 
-		return filepath.Join(ttDir, "tt.db"), nil
+		return ttDir, nil
 	}
 
 	// Fallback per OS
 	if goos == "windows" {
-		val = os.Getenv("LOCALAPPDATA")
-		ttDir = filepath.Join(val, "tt")
-		if !filepath.IsAbs(val) {
-			return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "LOCALAPPDATA is not set to an absolute path"}
+		home = os.Getenv("LOCALAPPDATA")
+		ttDir = filepath.Join(home, "tt")
+		if !filepath.IsAbs(home) {
+			return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "LOCALAPPDATA is not set to an absolute path", Details: map[string]any{"path": ttDir}}
 		}
 	} else {
 		homeDir, err := os.UserHomeDir()
@@ -168,7 +183,7 @@ func dbFilePathPerOS(goos string) (string, error) {
 		return "", &clierr.Error{Code: clierr.DatabaseUnusable, Message: "unable to create default data directory", Cause: err, Details: map[string]any{"path": ttDir}}
 	}
 
-	return filepath.Join(ttDir, "tt.db"), nil
+	return ttDir, nil
 }
 
 // dbFilePath checks for an environmental override, otherwise returns the default database name in the

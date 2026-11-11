@@ -35,6 +35,7 @@ go.work.sum
 *.db
 *.db-wal
 *.db-shm
+*.db.lock
 
 # macOS
 .DS_Store

@@ -116,6 +116,12 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 		}
 	}
 
+	// entries marked as deleted with no Notion page succeed
+	if entryPageID == nil && e.DeletedAt != nil {
+		syncedAt := clock.NowUTC()
+		return syncResultSuccess(entryPageID, syncedAt), nil
+	}
+
 	if entryPageID != nil && e.DeletedAt == nil {
 		err = updatePage(ctx, m, entriesDataSourceID, *entryPageID, title, description, e)
 	} else if entryPageID != nil && e.DeletedAt != nil {
@@ -129,7 +135,7 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 
 	// success case
 	syncedAt := clock.NowUTC()
-	return syncResultSuccess(*entryPageID, syncedAt), nil
+	return syncResultSuccess(entryPageID, syncedAt), nil
 }
 
 // handleSyncError maps an error encountered during a sync operation to Notion to a syncResult,
@@ -174,9 +180,9 @@ type syncResult struct {
 
 // syncResultSuccess constructs a syncResult with status of 'synced', with appropriate
 // properties set
-func syncResultSuccess(entryPageID string, syncedAt time.Time) syncResult {
+func syncResultSuccess(entryPageID *string, syncedAt time.Time) syncResult {
 	return syncResult{
-		EntryPageID: &entryPageID,
+		EntryPageID: entryPageID,
 		Status:      "synced",
 		SyncedAt:    &syncedAt,
 		SyncError:   nil,

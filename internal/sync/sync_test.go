@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -765,6 +766,77 @@ func TestRun_PageNotFound_RechecksDataSource(t *testing.T) {
 			}
 			checkStored(t, st, first.ID, tc.wantFirstState, "")
 			checkStored(t, st, second.ID, "synced", "page-second")
+		})
+	}
+}
+
+// A tombstoned entry trashes its page rather than updating it, and one with no page in Notion
+// is simply dropped: nothing is created (§6.1). Nothing tombstones an entry in the store yet, so
+// deleted_at is set on the entry passed in
+func TestSyncPendingEntry_Tombstone(t *testing.T) {
+	tests := []struct {
+		name         string
+		storedPageID string // empty for none
+		foundPageID  string // the Local ID lookup's result, empty for none
+		wantFinds    int
+		wantTrashes  []string
+		wantPageID   string // empty for none
+	}{
+		{name: "not_found", wantFinds: 1},
+		{name: "found_by_local_id", foundPageID: "page-found", wantFinds: 1, wantTrashes: []string{"page-found"}, wantPageID: "page-found"},
+		// A stored page ID skips the lookup, which can't see trashed rows (§6.2)
+		{name: "stored_page_id", storedPageID: "page-1", wantFinds: 0, wantTrashes: []string{"page-1"}, wantPageID: "page-1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, _ := openSyncStore(t, true)
+			e := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			deletedAt := testEnd.Add(time.Hour)
+			e.DeletedAt = &deletedAt
+			if tc.storedPageID != "" {
+				e.EntryPageID = &tc.storedPageID
+			}
+			m := &fakeEntryManager{createdPageID: "page-created"}
+			if tc.foundPageID != "" {
+				m.foundPages = map[string]notion.Page{e.ID: {ID: tc.foundPageID}}
+			}
+			c := runClock(0)
+
+			got, err := syncPendingEntry(t.Context(), testEntriesDataSourceID, e, st, m, c, c.NowUTC())
+			if err != nil {
+				t.Fatalf("syncPendingEntry() error = %v, want nil", err)
+			}
+
+			if len(m.finds) != tc.wantFinds {
+				t.Errorf("FindEntryPage called %d times, want %d", len(m.finds), tc.wantFinds)
+			}
+			if len(m.creates) != 0 {
+				t.Errorf("CreateEntryPage called %d times, want 0", len(m.creates))
+			}
+			if len(m.updates) != 0 {
+				t.Errorf("UpdateEntryPage called %d times, want 0", len(m.updates))
+			}
+			if !slices.Equal(m.trashes, tc.wantTrashes) {
+				t.Errorf("TrashEntryPage page IDs = %v, want %v", m.trashes, tc.wantTrashes)
+			}
+
+			if got.Status != "synced" {
+				t.Errorf("Status = %q, want %q", got.Status, "synced")
+			}
+			var gotPageID string
+			if got.EntryPageID != nil {
+				gotPageID = *got.EntryPageID
+			}
+			if gotPageID != tc.wantPageID {
+				t.Errorf("EntryPageID = %q, want %q", gotPageID, tc.wantPageID)
+			}
+			if got.SyncedAt == nil || !got.SyncedAt.Equal(c.NowUTC()) {
+				t.Errorf("SyncedAt = %v, want %v", got.SyncedAt, c.NowUTC())
+			}
+			if got.SyncError != nil {
+				t.Errorf("SyncError = %q, want nil", *got.SyncError)
+			}
 		})
 	}
 }

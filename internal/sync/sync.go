@@ -78,6 +78,7 @@ type clock interface {
 // without requiring a real Notion client
 type notionEntryManager interface {
 	GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error)
+	EntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error)
 	FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (notion.Page, bool, error)
 	CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
 	UpdateEntryPage(ctx context.Context, pageID, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
@@ -115,8 +116,10 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 		}
 	}
 
-	if entryPageID != nil {
+	if entryPageID != nil && e.DeletedAt == nil {
 		err = updatePage(ctx, m, entriesDataSourceID, *entryPageID, title, description, e)
+	} else if entryPageID != nil && e.DeletedAt != nil {
+		err = trashPage(ctx, m, entriesDataSourceID, *entryPageID)
 	} else {
 		entryPageID, err = createPage(ctx, m, entriesDataSourceID, entryPageID, title, description, e)
 	}
@@ -254,9 +257,30 @@ func updatePage(ctx context.Context, m notionEntryManager, entriesDataSourceID s
 		}
 	}
 
-	if err != nil {
-		return err
+	return err
+}
+
+// trashPage updates the in_trash property of the corresponding Notion page to true.
+// A 404 could mean the data source is gone, so the data source is checked again: if the check
+// fails, that error is returned instead of the 404. If a 400 is returned, this could be because the page is
+// already trashed, and if so no error is returned as the sync can be marked successful
+func trashPage(ctx context.Context, m notionEntryManager, entriesDataSourceID string, entryPageID string) error {
+	_, err := m.TrashEntryPage(ctx, entryPageID, entriesDataSourceID)
+
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) {
+		if cliErr.Code == clierr.NotFound {
+			if err := checkDataSource(ctx, m, entriesDataSourceID); err != nil {
+				return err
+			}
+		}
+		if cliErr.Code == clierr.Usage {
+			if page, lookupErr := m.EntryPage(ctx, entryPageID, entriesDataSourceID); lookupErr == nil && page.InTrash {
+				return nil
+			}
+			return err
+		}
 	}
 
-	return nil
+	return err
 }

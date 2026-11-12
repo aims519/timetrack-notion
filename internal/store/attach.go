@@ -71,7 +71,8 @@ func entryByIDPrefix(ctx context.Context, tx *sql.Tx, prefix, dbPath, contextID 
 		tasks.name,
 		entries.entry_page_id,
 		entries.sync_state,
-		entries.updated_at
+		entries.updated_at,
+		entries.deleted_at
 		FROM entries
 		LEFT JOIN tasks ON entries.task_page_id = tasks.page_id
 			AND tasks.context_id = entries.context_id

@@ -127,6 +127,7 @@ func entryPagePayload(dataSourceID, title, description, localID, taskPageID stri
 			"Description": obj{"type": "rich_text", "rich_text": textItems(description)},
 			"Task":        obj{"type": "relation", "relation": relationItems(taskPageID)},
 		},
+		"in_trash": false,
 	}
 
 	b, err := json.Marshal(body)

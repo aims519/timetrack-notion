@@ -68,7 +68,8 @@ func scanEntryRow(ctx context.Context, tx *sql.Tx, id uuid.UUID) (Entry, error) 
 	tasks.name,
 	entry_page_id,
 	sync_state,
-	updated_at
+	updated_at,
+	deleted_at
 	FROM entries 
 	LEFT JOIN tasks ON entries.task_page_id = tasks.page_id
 		AND tasks.context_id = entries.context_id
@@ -83,6 +84,7 @@ func scanEntry(s scanner) (Entry, error) {
 	var startUTCStr string
 	var endUTCStr *string
 	var updatedAtUTCStr string
+	var deletedAtUTCStr *string
 	err := s.Scan(&entry.ID,
 		&entry.Description,
 		&startUTCStr,
@@ -92,6 +94,7 @@ func scanEntry(s scanner) (Entry, error) {
 		&entry.EntryPageID,
 		&entry.SyncState,
 		&updatedAtUTCStr,
+		&deletedAtUTCStr,
 	)
 	if err != nil {
 		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "unable to scan row from entries: " + err.Error(), Cause: err}
@@ -110,6 +113,11 @@ func scanEntry(s scanner) (Entry, error) {
 	entry.UpdatedAt, err = FromDBString(updatedAtUTCStr)
 	if err != nil {
 		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "error parsing time string from updated_at", Cause: err, Details: map[string]any{"updated_at": updatedAtUTCStr}}
+	}
+
+	entry.DeletedAt, err = FromNullableDBString(deletedAtUTCStr)
+	if err != nil {
+		return Entry{}, &clierr.Error{Code: clierr.Internal, Message: "error parsing time string from deleted_at", Cause: err, Details: map[string]any{"deleted_at": deletedAtUTCStr}}
 	}
 
 	return entry, nil

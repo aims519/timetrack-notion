@@ -66,12 +66,15 @@ type fakeEntryManager struct {
 	createErr         map[string]error
 	onCreate          func(localID string) // runs during each create, before it returns
 	updateErr         map[string]error
+	trashErr          map[string]error       // by page ID, as a trash request has no local ID
+	entryPages        map[string]notion.Page // EntryPage results, by page ID
 
 	dataSources []string // data source IDs checked
 	finds       []string // local IDs looked up
 	creates     []entryPageCall
 	updates     []entryPageCall
-	trashes     []string
+	trashes     []string // page IDs trashed
+	retrieves   []string // page IDs retrieved
 }
 
 func (f *fakeEntryManager) GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error) {
@@ -122,12 +125,21 @@ func (f *fakeEntryManager) UpdateEntryPage(ctx context.Context, pageID, dataSour
 
 func (f *fakeEntryManager) TrashEntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error) {
 	f.trashes = append(f.trashes, pageID)
+	if err := f.trashErr[pageID]; err != nil {
+		return notion.Page{}, err
+	}
+
 	return notion.Page{ID: pageID, InTrash: true}, nil
+}
+
+func (f *fakeEntryManager) EntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error) {
+	f.retrieves = append(f.retrieves, pageID)
+	return f.entryPages[pageID], nil
 }
 
 // requests counts every Notion request the fake has answered
 func (f *fakeEntryManager) requests() int {
-	return len(f.dataSources) + len(f.finds) + len(f.creates) + len(f.updates) + len(f.trashes)
+	return len(f.dataSources) + len(f.finds) + len(f.creates) + len(f.updates) + len(f.trashes) + len(f.retrieves)
 }
 
 // openSyncStore opens a store in a temp directory with one cached task. With connected set,
@@ -753,6 +765,107 @@ func TestRun_PageNotFound_RechecksDataSource(t *testing.T) {
 			}
 			checkStored(t, st, first.ID, tc.wantFirstState, "")
 			checkStored(t, st, second.ID, "synced", "page-second")
+		})
+	}
+}
+
+// Notion rejects trashing an already-trashed page with a 400, so a trash that gets a 400
+// retrieves the page: trashed is success, otherwise the 400 stands and the entry is blocked
+// (§6.1, question 19)
+func TestTrashPage(t *testing.T) {
+	badRequest := &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}
+
+	tests := []struct {
+		name          string
+		trashErr      error
+		retrieved     notion.Page // what EntryPage returns after a 400
+		wantRetrieves int
+		wantCode      clierr.ErrorCode // empty when the trash counts as success
+	}{
+		{name: "trashed", wantRetrieves: 0},
+		{name: "already_trashed", trashErr: badRequest, retrieved: notion.Page{ID: "page-1", InTrash: true}, wantRetrieves: 1},
+		{name: "bad_request_not_trashed", trashErr: badRequest, retrieved: notion.Page{ID: "page-1"}, wantRetrieves: 1, wantCode: clierr.Usage},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &fakeEntryManager{
+				trashErr:   map[string]error{"page-1": tc.trashErr},
+				entryPages: map[string]notion.Page{"page-1": tc.retrieved},
+			}
+
+			err := trashPage(t.Context(), m, testEntriesDataSourceID, "page-1")
+
+			if len(m.trashes) != 1 || m.trashes[0] != "page-1" {
+				t.Errorf("TrashEntryPage page IDs = %v, want [page-1]", m.trashes)
+			}
+			if len(m.retrieves) != tc.wantRetrieves {
+				t.Errorf("EntryPage called %d times, want %d", len(m.retrieves), tc.wantRetrieves)
+			}
+			for _, id := range m.retrieves {
+				if id != "page-1" {
+					t.Errorf("EntryPage page ID = %q, want %q", id, "page-1")
+				}
+			}
+
+			if tc.wantCode == "" {
+				if err != nil {
+					t.Fatalf("trashPage() = %v, want nil", err)
+				}
+				return
+			}
+			checkCode(t, err, tc.wantCode)
+		})
+	}
+}
+
+// A 404 on a trash could be the data source or the entry's own page, so the data source is
+// checked again. If it's unusable the error wraps ErrDataSourceUnusable and the run stops;
+// if it's fine the 404 stands, so only that entry is blocked (§6.3)
+func TestTrashPage_NotFound_RechecksDataSource(t *testing.T) {
+	pageNotFound := &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}
+
+	tests := []struct {
+		name         string
+		checkErr     error
+		checkInTrash bool
+		wantCode     clierr.ErrorCode
+		wantUnusable bool // the run stops rather than blocking the entry
+	}{
+		{name: "data_source_gone", checkErr: pageNotFound, wantCode: clierr.NotFound, wantUnusable: true},
+		{name: "data_source_trashed", checkInTrash: true, wantCode: clierr.NotFound, wantUnusable: true},
+		{name: "data_source_fine", wantCode: clierr.NotFound},
+		{name: "check_offline", checkErr: &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"}, wantCode: clierr.Offline},
+		{name: "check_access_denied", checkErr: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
+		{name: "check_server_error", checkErr: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantCode: clierr.Internal},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// trashPage is called directly, so its re-check is the fake's first GetDataSource
+			m := &fakeEntryManager{
+				trashErr:          map[string]error{"page-1": pageNotFound},
+				dataSourceErr:     tc.checkErr,
+				dataSourceInTrash: tc.checkInTrash,
+			}
+
+			err := trashPage(t.Context(), m, testEntriesDataSourceID, "page-1")
+
+			if len(m.trashes) != 1 || m.trashes[0] != "page-1" {
+				t.Errorf("TrashEntryPage page IDs = %v, want [page-1]", m.trashes)
+			}
+			if len(m.dataSources) != 1 || m.dataSources[0] != testEntriesDataSourceID {
+				t.Errorf("GetDataSource IDs = %v, want [%s]", m.dataSources, testEntriesDataSourceID)
+			}
+			// Only a 400 retrieves the page
+			if len(m.retrieves) != 0 {
+				t.Errorf("EntryPage called %d times, want 0", len(m.retrieves))
+			}
+
+			checkCode(t, err, tc.wantCode)
+			if got := errors.Is(err, notion.ErrDataSourceUnusable); got != tc.wantUnusable {
+				t.Errorf("errors.Is(err, ErrDataSourceUnusable) = %v, want %v", got, tc.wantUnusable)
+			}
 		})
 	}
 }

@@ -78,6 +78,7 @@ type clock interface {
 // without requiring a real Notion client
 type notionEntryManager interface {
 	GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error)
+	EntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error)
 	FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (notion.Page, bool, error)
 	CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
 	UpdateEntryPage(ctx context.Context, pageID, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
@@ -115,8 +116,16 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 		}
 	}
 
-	if entryPageID != nil {
+	// entries marked as deleted with no Notion page succeed
+	if entryPageID == nil && e.DeletedAt != nil {
+		syncedAt := clock.NowUTC()
+		return syncResultSuccess(entryPageID, syncedAt), nil
+	}
+
+	if entryPageID != nil && e.DeletedAt == nil {
 		err = updatePage(ctx, m, entriesDataSourceID, *entryPageID, title, description, e)
+	} else if entryPageID != nil && e.DeletedAt != nil {
+		err = trashPage(ctx, m, entriesDataSourceID, *entryPageID)
 	} else {
 		entryPageID, err = createPage(ctx, m, entriesDataSourceID, entryPageID, title, description, e)
 	}
@@ -126,7 +135,7 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 
 	// success case
 	syncedAt := clock.NowUTC()
-	return syncResultSuccess(*entryPageID, syncedAt), nil
+	return syncResultSuccess(entryPageID, syncedAt), nil
 }
 
 // handleSyncError maps an error encountered during a sync operation to Notion to a syncResult,
@@ -171,9 +180,9 @@ type syncResult struct {
 
 // syncResultSuccess constructs a syncResult with status of 'synced', with appropriate
 // properties set
-func syncResultSuccess(entryPageID string, syncedAt time.Time) syncResult {
+func syncResultSuccess(entryPageID *string, syncedAt time.Time) syncResult {
 	return syncResult{
-		EntryPageID: &entryPageID,
+		EntryPageID: entryPageID,
 		Status:      "synced",
 		SyncedAt:    &syncedAt,
 		SyncError:   nil,
@@ -254,9 +263,37 @@ func updatePage(ctx context.Context, m notionEntryManager, entriesDataSourceID s
 		}
 	}
 
-	if err != nil {
-		return err
+	return err
+}
+
+// trashPage updates the in_trash property of the corresponding Notion page to true.
+// A 404 could mean the data source is gone, so the data source is checked again: if the check
+// fails, that error is returned instead of the 404. If a 400 is returned, this could be because the page is
+// already trashed, and if so no error is returned as the sync can be marked successful
+func trashPage(ctx context.Context, m notionEntryManager, entriesDataSourceID string, entryPageID string) error {
+	_, err := m.TrashEntryPage(ctx, entryPageID, entriesDataSourceID)
+
+	var cliErr *clierr.Error
+	if errors.As(err, &cliErr) {
+		if cliErr.Code == clierr.NotFound {
+			if err := checkDataSource(ctx, m, entriesDataSourceID); err != nil {
+				return err
+			}
+		}
+		if cliErr.Code == clierr.Usage {
+			page, lookupErr := m.EntryPage(ctx, entryPageID, entriesDataSourceID)
+			// return lookup error if one should occur, since we can't tell if the page is trashed or not
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if page.InTrash {
+				return nil
+			}
+
+			// return original usage error
+			return err
+		}
 	}
 
-	return nil
+	return err
 }

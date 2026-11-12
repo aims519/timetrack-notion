@@ -19,7 +19,8 @@ func (s *Store) PendingEntries(ctx context.Context, contextID string) ([]Entry, 
 		tasks.name,
 		entry_page_id,
 		sync_state,
-		updated_at
+		updated_at,
+		deleted_at
 		FROM entries
 		JOIN tasks ON entries.task_page_id = tasks.page_id
 			AND tasks.context_id = entries.context_id

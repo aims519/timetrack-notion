@@ -130,7 +130,8 @@ func entriesStartedToday(ctx context.Context, tx *sql.Tx, start, end time.Time, 
 	tasks.name,
 	entry_page_id,
 	sync_state,
-	updated_at
+	updated_at,
+	deleted_at
 	FROM entries
 	LEFT JOIN tasks on entries.task_page_id = tasks.page_id
 		AND tasks.context_id = entries.context_id

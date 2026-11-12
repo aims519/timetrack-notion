@@ -12,4 +12,5 @@ type Entry struct {
 	EntryPageID *string
 	SyncState   string
 	UpdatedAt   time.Time
+	DeletedAt   *time.Time
 }

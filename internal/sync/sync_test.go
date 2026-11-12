@@ -69,6 +69,7 @@ type fakeEntryManager struct {
 	updateErr         map[string]error
 	trashErr          map[string]error       // by page ID, as a trash request has no local ID
 	entryPages        map[string]notion.Page // EntryPage results, by page ID
+	entryPageErr      map[string]error       // returned by EntryPage, by page ID
 
 	dataSources []string // data source IDs checked
 	finds       []string // local IDs looked up
@@ -135,6 +136,10 @@ func (f *fakeEntryManager) TrashEntryPage(ctx context.Context, pageID, dataSourc
 
 func (f *fakeEntryManager) EntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error) {
 	f.retrieves = append(f.retrieves, pageID)
+	if err := f.entryPageErr[pageID]; err != nil {
+		return notion.Page{}, err
+	}
+
 	return f.entryPages[pageID], nil
 }
 
@@ -843,7 +848,9 @@ func TestSyncPendingEntry_Tombstone(t *testing.T) {
 
 // Notion rejects trashing an already-trashed page with a 400, so a trash that gets a 400
 // retrieves the page: trashed is success, otherwise the 400 stands and the entry is blocked
-// (§6.1, question 19)
+// (§6.1, question 19). A failed retrieve can't tell whether the page is trashed, so its error is
+// returned instead of the 400: an offline retrieve stops the run with the entry still pending,
+// rather than blocking it for good (§6.3)
 func TestTrashPage(t *testing.T) {
 	badRequest := &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}
 
@@ -851,19 +858,35 @@ func TestTrashPage(t *testing.T) {
 		name          string
 		trashErr      error
 		retrieved     notion.Page // what EntryPage returns after a 400
+		retrieveErr   error       // what EntryPage fails with after a 400
 		wantRetrieves int
 		wantCode      clierr.ErrorCode // empty when the trash counts as success
 	}{
 		{name: "trashed", wantRetrieves: 0},
 		{name: "already_trashed", trashErr: badRequest, retrieved: notion.Page{ID: "page-1", InTrash: true}, wantRetrieves: 1},
 		{name: "bad_request_not_trashed", trashErr: badRequest, retrieved: notion.Page{ID: "page-1"}, wantRetrieves: 1, wantCode: clierr.Usage},
+		{
+			name:          "retrieve_offline",
+			trashErr:      badRequest,
+			retrieveErr:   &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"},
+			wantRetrieves: 1,
+			wantCode:      clierr.Offline,
+		},
+		{
+			name:          "retrieve_server_error",
+			trashErr:      badRequest,
+			retrieveErr:   &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"},
+			wantRetrieves: 1,
+			wantCode:      clierr.Internal,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &fakeEntryManager{
-				trashErr:   map[string]error{"page-1": tc.trashErr},
-				entryPages: map[string]notion.Page{"page-1": tc.retrieved},
+				trashErr:     map[string]error{"page-1": tc.trashErr},
+				entryPages:   map[string]notion.Page{"page-1": tc.retrieved},
+				entryPageErr: map[string]error{"page-1": tc.retrieveErr},
 			}
 
 			err := trashPage(t.Context(), m, testEntriesDataSourceID, "page-1")

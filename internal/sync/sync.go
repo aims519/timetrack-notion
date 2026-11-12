@@ -281,9 +281,16 @@ func trashPage(ctx context.Context, m notionEntryManager, entriesDataSourceID st
 			}
 		}
 		if cliErr.Code == clierr.Usage {
-			if page, lookupErr := m.EntryPage(ctx, entryPageID, entriesDataSourceID); lookupErr == nil && page.InTrash {
+			page, lookupErr := m.EntryPage(ctx, entryPageID, entriesDataSourceID)
+			// return lookup error if one should occur, since we can't tell if the page is trashed or not
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if page.InTrash {
 				return nil
 			}
+
+			// return original usage error
 			return err
 		}
 	}

@@ -848,6 +848,81 @@ var (
 	}
 )
 
+// A 429 or 5xx on the run's first data source check is retried like an entry's, as Notion did
+// answer. A network failure there means the first connection failed, so the run aborts at once
+// (§6.3). A check that never succeeds stops the run before any entry request, leaving it pending
+func TestRun_DataSourceCheck_Retries(t *testing.T) {
+	tests := []struct {
+		name       string
+		firstErr   error // the first check's error
+		laterErr   error // every later check's error
+		wantChecks int
+		wantWaits  []time.Duration  // exact, when Retry-After sets them
+		wantBounds []time.Duration  // or each wait is below its bound, for backoff
+		wantCode   clierr.ErrorCode // empty when the run carries on
+		wantState  string
+	}{
+		{name: "rate_limited_once", firstErr: rateLimited(2), wantChecks: 2, wantWaits: []time.Duration{2 * time.Second}, wantState: "synced"},
+		{
+			name:       "server_error_every_attempt",
+			firstErr:   serverError,
+			laterErr:   serverError,
+			wantChecks: testRetrySettings().maxAttempts,
+			wantBounds: []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second},
+			wantCode:   clierr.Internal,
+			wantState:  "pending",
+		},
+		{
+			name:       "offline",
+			firstErr:   &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"},
+			wantChecks: 1,
+			wantCode:   clierr.Offline,
+			wantState:  "pending",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			entry := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			m := &fakeEntryManager{dataSourceErr: tc.firstErr, recheckErr: tc.laterErr, createdPageID: "page-1"}
+			c := runClock(0)
+
+			err := Run(t.Context(), st, m, c, lockPath, testRetrySettings())
+
+			if len(m.dataSources) != tc.wantChecks {
+				t.Errorf("GetDataSource called %d times, want %d", len(m.dataSources), tc.wantChecks)
+			}
+			if tc.wantBounds != nil {
+				if len(c.sleeps) != len(tc.wantBounds) {
+					t.Fatalf("waits = %v, want %d of them", c.sleeps, len(tc.wantBounds))
+				}
+				for i, wait := range c.sleeps {
+					if wait < 0 || wait >= tc.wantBounds[i] {
+						t.Errorf("wait %d = %v, want at least 0 and below %v", i+1, wait, tc.wantBounds[i])
+					}
+				}
+			} else if !slices.Equal(c.sleeps, tc.wantWaits) {
+				t.Errorf("waits = %v, want %v", c.sleeps, tc.wantWaits)
+			}
+
+			if tc.wantCode == "" {
+				if err != nil {
+					t.Fatalf("Run() = %v, want nil", err)
+				}
+				checkStored(t, st, entry.ID, tc.wantState, "page-1")
+				return
+			}
+
+			checkCode(t, err, tc.wantCode)
+			if n := len(m.finds) + len(m.creates) + len(m.updates); n != 0 {
+				t.Errorf("Run() made %d entry requests after a failed check, want 0", n)
+			}
+			checkStored(t, st, entry.ID, tc.wantState, "")
+		})
+	}
+}
+
 // The entries data source is checked once, before any entry, and a failure stops the run with
 // every entry left as it was (§6.3)
 func TestRun_DataSourceCheck(t *testing.T) {

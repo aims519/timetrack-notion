@@ -46,15 +46,19 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		return nil
 	}
 
-	// Check data source exists, abort if not
-	err = checkDataSource(ctx, m, *notionContext.EntriesDataSourceID)
+	// Check data source exists, abort if not (after retries)
+	_, err = withRetry(ctx, clock, retrySettings, func() (interface{}, error) {
+		return nil, checkDataSource(ctx, m, *notionContext.EntriesDataSourceID)
+	})
 	if err != nil {
 		return err
 	}
 
 	// Create/Update entry pages
 	for _, p := range pending {
-		result, err := syncWithRetry(ctx, *notionContext.EntriesDataSourceID, p, s, m, clock, attemptedAtUTC, syncPendingEntry, retrySettings)
+		result, err := withRetry(ctx, clock, retrySettings, func() (syncResult, error) {
+			return syncPendingEntry(ctx, *notionContext.EntriesDataSourceID, p, s, m, clock, attemptedAtUTC)
+		})
 		if err != nil {
 			result, err = handleSyncError(err)
 		}
@@ -309,8 +313,6 @@ func trashPage(ctx context.Context, m notionEntryManager, entriesDataSourceID st
 	return err
 }
 
-type syncOperation func(ctx context.Context, entriesDataSourceID string, e store.Entry, s *store.Store, m notionEntryManager, clock clock, attemptedAtUTC time.Time) (syncResult, error)
-
 // RetrySettings encapsulates all settings required to handle automatic retries
 // of sync-related requests to Notion
 type RetrySettings struct {
@@ -331,12 +333,12 @@ func DefaultRetrySettings(source rand.Source) RetrySettings {
 	}
 }
 
-// syncWithRetry wraps the pending sync entry operation with retries if a 429 error is found
-func syncWithRetry(ctx context.Context, entriesDataSourceID string, e store.Entry, s *store.Store, m notionEntryManager, clock clock, attemptedAtUTC time.Time, syncOp syncOperation, settings RetrySettings) (syncResult, error) {
-	var res syncResult
+// withRetry wraps calls to Notion that should be retried in the event of a 429 or 5xx response
+func withRetry[T any](ctx context.Context, clock clock, settings RetrySettings, op func() (T, error)) (T, error) {
+	var res T
 	var err error
 	for i := 1; i <= settings.maxAttempts; i++ {
-		res, err = syncOp(ctx, entriesDataSourceID, e, s, m, clock, attemptedAtUTC)
+		res, err = op()
 
 		if i == settings.maxAttempts {
 			return res, err
@@ -356,7 +358,7 @@ func syncWithRetry(ctx context.Context, entriesDataSourceID string, e store.Entr
 
 			sleepErr := clock.Sleep(ctx, wait)
 			if sleepErr != nil {
-				return syncResult{}, sleepErr
+				return res, sleepErr
 			}
 			continue
 		}
@@ -367,7 +369,7 @@ func syncWithRetry(ctx context.Context, entriesDataSourceID string, e store.Entr
 
 			sleepErr := clock.Sleep(ctx, wait)
 			if sleepErr != nil {
-				return syncResult{}, sleepErr
+				return res, sleepErr
 			}
 
 			continue

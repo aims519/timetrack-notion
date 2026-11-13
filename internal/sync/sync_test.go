@@ -3,6 +3,8 @@ package sync
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -25,20 +27,33 @@ var (
 	testEnd   = time.Date(2026, 11, 10, 10, 15, 45, 0, time.UTC)
 )
 
-// fakeClock satisfies the clock interface Run needs, for testing
+// fakeClock satisfies the clock interface Run needs, for testing. Sleep records the wait and
+// returns at once, with sleepErr standing in for a context cancelled during the wait
 type fakeClock struct {
-	nowUTC time.Time
+	nowUTC   time.Time
+	sleepErr error
+	sleeps   []time.Duration
 }
 
-func (fc fakeClock) NowUTC() time.Time {
+func (fc *fakeClock) NowUTC() time.Time {
 	return fc.nowUTC
+}
+
+func (fc *fakeClock) Sleep(ctx context.Context, d time.Duration) error {
+	fc.sleeps = append(fc.sleeps, d)
+	return fc.sleepErr
 }
 
 // runClock is a clock for one sync run, offset to order several runs. It's fixed in the past,
 // earlier than the wall-clock updated_at the store stamps when seeding, because the result of a
 // run must not depend on how its clock compares with an entry's updated_at
-func runClock(offset time.Duration) fakeClock {
-	return fakeClock{nowUTC: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Add(offset)}
+func runClock(offset time.Duration) *fakeClock {
+	return &fakeClock{nowUTC: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Add(offset)}
+}
+
+// testRetrySettings are the default retry settings, seeded so any jitter repeats from run to run
+func testRetrySettings() RetrySettings {
+	return DefaultRetrySettings(rand.NewPCG(1, 2))
 }
 
 var _ notionEntryManager = (*fakeEntryManager)(nil)
@@ -65,6 +80,7 @@ type fakeEntryManager struct {
 	createdPageID     string
 	findErr           map[string]error
 	createErr         map[string]error
+	createErrSeq      map[string][]error   // one error per create, in order, then createErr
 	onCreate          func(localID string) // runs during each create, before it returns
 	updateErr         map[string]error
 	trashErr          map[string]error       // by page ID, as a trash request has no local ID
@@ -108,6 +124,12 @@ func (f *fakeEntryManager) CreateEntryPage(ctx context.Context, dataSourceID, ti
 	f.creates = append(f.creates, entryPageCall{dataSourceID: dataSourceID, title: title, description: description, localID: localID, taskPageID: taskPageID, start: start, end: end})
 	if f.onCreate != nil {
 		f.onCreate(localID)
+	}
+	if seq := f.createErrSeq[localID]; len(seq) > 0 {
+		f.createErrSeq[localID] = seq[1:]
+		if seq[0] != nil {
+			return notion.Page{}, seq[0]
+		}
 	}
 	if err := f.createErr[localID]; err != nil {
 		return notion.Page{}, err
@@ -254,7 +276,7 @@ func checkCode(t *testing.T, err error, want clierr.ErrorCode) {
 func TestRun_LockFree_ReleasesLock(t *testing.T) {
 	st, lockPath := openSyncStore(t, true)
 
-	if err := Run(t.Context(), st, &fakeEntryManager{}, runClock(0), lockPath); err != nil {
+	if err := Run(t.Context(), st, &fakeEntryManager{}, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("Run(%q) = %v, want nil", lockPath, err)
 	}
 
@@ -316,7 +338,7 @@ func TestRun_Errors(t *testing.T) {
 			path := tc.lockPath(t, defaultPath)
 			m := &fakeEntryManager{createdPageID: "page-1"}
 
-			err := Run(t.Context(), st, m, runClock(0), path)
+			err := Run(t.Context(), st, m, runClock(0), path, testRetrySettings())
 
 			checkCode(t, err, tc.wantCode)
 			if n := m.requests(); n != 0 {
@@ -333,7 +355,7 @@ func TestRun_CreatesPageForNewEntry(t *testing.T) {
 	entry := seedStoppedEntry(t, st, &description, testStart, testEnd)
 	m := &fakeEntryManager{createdPageID: "page-1"}
 
-	if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+	if err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("Run() = %v, want nil", err)
 	}
 
@@ -389,7 +411,7 @@ func TestRun_EntryPageTitle(t *testing.T) {
 			seedStoppedEntry(t, st, tc.description, testStart, testEnd)
 			m := &fakeEntryManager{createdPageID: "page-1"}
 
-			if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+			if err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings()); err != nil {
 				t.Fatalf("Run() = %v, want nil", err)
 			}
 			if len(m.creates) != 1 {
@@ -412,7 +434,7 @@ func TestRun_AdoptsPageFoundByLocalID(t *testing.T) {
 	entry := seedStoppedEntry(t, st, nil, testStart, testEnd)
 	m := &fakeEntryManager{foundPages: map[string]notion.Page{entry.ID: {ID: "page-existing"}}}
 
-	if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+	if err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("Run() = %v, want nil", err)
 	}
 
@@ -437,7 +459,7 @@ func TestRun_EntryWithPageID_UpdatesDirectly(t *testing.T) {
 
 	// First run records the page, then attaching the task again makes the entry pending
 	first := &fakeEntryManager{createdPageID: "page-1"}
-	if err := Run(t.Context(), st, first, runClock(0), lockPath); err != nil {
+	if err := Run(t.Context(), st, first, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("first Run() = %v, want nil", err)
 	}
 	if _, err := st.AttachTaskToEntry(t.Context(), entry.ID, testTaskID, runClock(time.Minute).NowUTC()); err != nil {
@@ -447,7 +469,7 @@ func TestRun_EntryWithPageID_UpdatesDirectly(t *testing.T) {
 
 	// The lookup finds nothing, as it would for a row the user has trashed
 	m := &fakeEntryManager{createdPageID: "page-duplicate"}
-	if err := Run(t.Context(), st, m, runClock(2*time.Minute), lockPath); err != nil {
+	if err := Run(t.Context(), st, m, runClock(2*time.Minute), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("second Run() = %v, want nil", err)
 	}
 
@@ -479,13 +501,13 @@ func TestRun_EditedDuringSync_StaysPending(t *testing.T) {
 			}
 		},
 	}
-	if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+	if err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("first Run() = %v, want nil", err)
 	}
 	checkStored(t, st, entry.ID, "pending", "")
 
 	next := &fakeEntryManager{foundPages: map[string]notion.Page{entry.ID: {ID: "page-1"}}}
-	if err := Run(t.Context(), st, next, runClock(time.Minute), lockPath); err != nil {
+	if err := Run(t.Context(), st, next, runClock(time.Minute), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("second Run() = %v, want nil", err)
 	}
 	if len(next.creates) != 0 {
@@ -513,7 +535,7 @@ func TestRun_NotionErrorOnOneEntry(t *testing.T) {
 			good := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
 			m := &fakeEntryManager{createdPageID: "page-good", createErr: map[string]error{bad.ID: tc.err}}
 
-			if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+			if err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings()); err != nil {
 				t.Fatalf("Run() = %v, want nil", err)
 			}
 
@@ -529,32 +551,27 @@ func TestRun_RetriesFailedEntry(t *testing.T) {
 	entry := seedStoppedEntry(t, st, nil, testStart, testEnd)
 
 	failing := &fakeEntryManager{createErr: map[string]error{entry.ID: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}}}
-	if err := Run(t.Context(), st, failing, runClock(0), lockPath); err != nil {
+	if err := Run(t.Context(), st, failing, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("first Run() = %v, want nil", err)
 	}
 	checkStored(t, st, entry.ID, "failed", "")
 
 	m := &fakeEntryManager{createdPageID: "page-1"}
-	if err := Run(t.Context(), st, m, runClock(time.Minute), lockPath); err != nil {
+	if err := Run(t.Context(), st, m, runClock(time.Minute), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("second Run() = %v, want nil", err)
 	}
 
 	checkStored(t, st, entry.ID, "synced", "page-1")
 }
 
-// A rate limit or a rejected token stops the run without recording a result, so the entry that
-// hit it and every entry after it stay pending for the next run (§6.3)
+// A rejected token stops the run without recording a result, so the entry that hit it and every
+// entry after it stay pending for the next run (§6.3)
 func TestRun_AbortsRun(t *testing.T) {
 	tests := []struct {
 		name     string
 		err      error
 		wantCode clierr.ErrorCode
 	}{
-		{
-			name:     "rate_limited",
-			err:      &clierr.Error{Code: clierr.Offline, Message: "too many requests to Notion", Cause: &notion.TooManyRequestsError{}},
-			wantCode: clierr.Offline,
-		},
 		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
 	}
 
@@ -567,7 +584,7 @@ func TestRun_AbortsRun(t *testing.T) {
 			// Both entries fail, so the test doesn't depend on which one the run reaches first
 			m := &fakeEntryManager{createErr: map[string]error{first.ID: tc.err, second.ID: tc.err}}
 
-			err := Run(t.Context(), st, m, runClock(0), lockPath)
+			err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings())
 
 			checkCode(t, err, tc.wantCode)
 			if len(m.creates) != 1 {
@@ -577,6 +594,164 @@ func TestRun_AbortsRun(t *testing.T) {
 			checkStored(t, st, second.ID, "pending", "")
 		})
 	}
+}
+
+// rateLimited is the error the client returns for a 429, with the Retry-After seconds Notion sent
+func rateLimited(retryAfterSeconds int) error {
+	return &clierr.Error{
+		Code:    clierr.Offline,
+		Message: "too many requests to Notion",
+		Cause:   &notion.TooManyRequestsError{RetryAfterSeconds: &retryAfterSeconds},
+	}
+}
+
+// count returns how many times id appears in ids
+func count(ids []string, id string) int {
+	n := 0
+	for _, got := range ids {
+		if got == id {
+			n++
+		}
+	}
+	return n
+}
+
+// A 429 is retried after waiting Retry-After, up to testRetrySettings().maxAttempts attempts in all, and only
+// then is the entry marked failed. The run carries on with the next entry either way. Each attempt
+// looks the entry up by Local ID again, as a create that seemed to fail may have succeeded (§6.2,
+// §6.3)
+func TestRun_RateLimited_Retries(t *testing.T) {
+	tests := []struct {
+		name         string
+		createErr    error   // every create fails with this
+		createErrSeq []error // or the first creates fail with these, then succeed
+		wantAttempts int
+		wantSleeps   []time.Duration
+		wantState    string
+		wantPageID   string
+	}{
+		{
+			name:         "every_attempt",
+			createErr:    rateLimited(2),
+			wantAttempts: testRetrySettings().maxAttempts,
+			// No wait after the last attempt: nothing follows it
+			wantSleeps: slices.Repeat([]time.Duration{2 * time.Second}, testRetrySettings().maxAttempts-1),
+			wantState:  "failed",
+		},
+		{
+			name:         "once_then_success",
+			createErrSeq: []error{rateLimited(2)},
+			wantAttempts: 2,
+			wantSleeps:   []time.Duration{2 * time.Second},
+			wantState:    "synced",
+			wantPageID:   "page-1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			limited := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			next := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
+			m := &fakeEntryManager{createdPageID: "page-1"}
+			if tc.createErr != nil {
+				m.createErr = map[string]error{limited.ID: tc.createErr}
+			}
+			if tc.createErrSeq != nil {
+				m.createErrSeq = map[string][]error{limited.ID: tc.createErrSeq}
+			}
+			c := runClock(0)
+
+			if err := Run(t.Context(), st, m, c, lockPath, testRetrySettings()); err != nil {
+				t.Fatalf("Run() = %v, want nil", err)
+			}
+
+			if got := count(m.finds, limited.ID); got != tc.wantAttempts {
+				t.Errorf("FindEntryPage called %d times for the limited entry, want %d", got, tc.wantAttempts)
+			}
+			var creates []string
+			for _, call := range m.creates {
+				creates = append(creates, call.localID)
+			}
+			if got := count(creates, limited.ID); got != tc.wantAttempts {
+				t.Errorf("CreateEntryPage called %d times for the limited entry, want %d", got, tc.wantAttempts)
+			}
+			if !slices.Equal(c.sleeps, tc.wantSleeps) {
+				t.Errorf("waits = %v, want %v", c.sleeps, tc.wantSleeps)
+			}
+
+			checkStored(t, st, limited.ID, tc.wantState, tc.wantPageID)
+			checkStored(t, st, next.ID, "synced", "page-1")
+		})
+	}
+}
+
+// A 429 with no Retry-After waits a random time below a bound that doubles with each attempt, up
+// to the cap ("full jitter"). The seed is fixed, so the waits repeat, but they're only checked
+// against their bounds: strictly below, so a wait equal to its bound means the jitter is missing
+func TestRun_RateLimited_Backoff(t *testing.T) {
+	noRetryAfter := &clierr.Error{
+		Code:    clierr.Offline,
+		Message: "too many requests to Notion",
+		Cause:   &notion.TooManyRequestsError{},
+	}
+
+	tests := []struct {
+		name       string
+		cap        time.Duration
+		wantBounds []time.Duration // one per wait, the bound for the attempt before it
+	}{
+		{name: "doubling", cap: 30 * time.Second, wantBounds: []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}},
+		{name: "capped", cap: 3 * time.Second, wantBounds: []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 3 * time.Second}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			limited := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			m := &fakeEntryManager{createErr: map[string]error{limited.ID: noRetryAfter}}
+			c := runClock(0)
+			settings := testRetrySettings()
+			settings.cap = tc.cap
+
+			if err := Run(t.Context(), st, m, c, lockPath, settings); err != nil {
+				t.Fatalf("Run() = %v, want nil", err)
+			}
+
+			if len(m.creates) != settings.maxAttempts {
+				t.Errorf("CreateEntryPage called %d times, want %d", len(m.creates), settings.maxAttempts)
+			}
+			if len(c.sleeps) != len(tc.wantBounds) {
+				t.Fatalf("waits = %v, want %d of them", c.sleeps, len(tc.wantBounds))
+			}
+			for i, wait := range c.sleeps {
+				if wait < 0 || wait >= tc.wantBounds[i] {
+					t.Errorf("wait %d = %v, want at least 0 and below %v", i+1, wait, tc.wantBounds[i])
+				}
+			}
+			checkStored(t, st, limited.ID, "failed", "")
+		})
+	}
+}
+
+// Ctrl-C during a wait stops the run with cancelled. Nothing is recorded, so the entry that was
+// waiting and every entry after it stay pending (§6.3)
+func TestRun_RateLimited_CancelledDuringWait(t *testing.T) {
+	st, lockPath := openSyncStore(t, true)
+	limited := seedStoppedEntry(t, st, nil, testStart, testEnd)
+	next := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
+	m := &fakeEntryManager{createdPageID: "page-1", createErr: map[string]error{limited.ID: rateLimited(2)}}
+	c := runClock(0)
+	c.sleepErr = context.Canceled
+
+	err := Run(t.Context(), st, m, c, lockPath, testRetrySettings())
+
+	checkCode(t, err, clierr.Cancelled)
+	if len(m.creates) != 1 {
+		t.Errorf("CreateEntryPage called %d times, want 1", len(m.creates))
+	}
+	checkStored(t, st, limited.ID, "pending", "")
+	checkStored(t, st, next.ID, "pending", "")
 }
 
 // Errors the client returns when a lookup's data source can't be used: gone (404), or
@@ -618,7 +793,7 @@ func TestRun_DataSourceCheck(t *testing.T) {
 			entry := seedStoppedEntry(t, st, nil, testStart, testEnd)
 			m := &fakeEntryManager{dataSourceErr: tc.err, dataSourceInTrash: tc.inTrash, createdPageID: "page-1"}
 
-			err := Run(t.Context(), st, m, runClock(0), lockPath)
+			err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings())
 
 			if len(m.dataSources) != 1 || m.dataSources[0] != testEntriesDataSourceID {
 				t.Errorf("GetDataSource IDs = %v, want [%s]", m.dataSources, testEntriesDataSourceID)
@@ -655,7 +830,7 @@ func TestRun_NothingPending_NoRequests(t *testing.T) {
 	}
 	m := &fakeEntryManager{}
 
-	if err := Run(t.Context(), st, m, runClock(0), lockPath); err != nil {
+	if err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("Run() = %v, want nil", err)
 	}
 	if n := m.requests(); n != 0 {
@@ -682,7 +857,7 @@ func TestRun_DataSourceUnusableDuringRun(t *testing.T) {
 			second := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
 			m := &fakeEntryManager{findErr: map[string]error{first.ID: tc.err, second.ID: tc.err}}
 
-			err := Run(t.Context(), st, m, runClock(0), lockPath)
+			err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings())
 
 			checkCode(t, err, tc.wantCode)
 			if len(m.finds) != 1 {
@@ -749,7 +924,7 @@ func TestRun_PageNotFound_RechecksDataSource(t *testing.T) {
 				m.createErr = map[string]error{first.ID: pageNotFound}
 			}
 
-			err := Run(t.Context(), st, m, runClock(0), lockPath)
+			err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings())
 
 			// Once at the start of the run, and once after the 404
 			if len(m.dataSources) != 2 {
@@ -972,11 +1147,9 @@ func TestHandleSyncError(t *testing.T) {
 		wantState string           // when the run carries on
 		wantCode  clierr.ErrorCode // when the run stops
 	}{
-		{
-			name:     "rate_limited",
-			err:      &clierr.Error{Code: clierr.Offline, Message: "too many requests to Notion", Cause: &notion.TooManyRequestsError{RetryAfterSeconds: new(30)}},
-			wantCode: clierr.Offline,
-		},
+		// Only reaches handleSyncError once its retries are spent, so it's recorded for next run
+		{name: "rate_limited", err: rateLimited(30), wantState: "failed"},
+		{name: "cancelled", err: fmt.Errorf("waiting to retry: %w", context.Canceled), wantCode: clierr.Cancelled},
 		{name: "access_denied", err: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
 		{name: "data_source_not_found", err: dataSourceNotFound, wantCode: clierr.NotFound},
 		{name: "data_source_query_rejected", err: dataSourceRejected, wantCode: clierr.Usage},

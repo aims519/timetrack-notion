@@ -4,6 +4,7 @@ package sync
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -14,7 +15,7 @@ import (
 
 // Run executes all pending sync operations from the database. Will fail with sync_busy
 // if another process holds the lock
-func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock, lockPath string) error {
+func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock, lockPath string, retrySettings RetrySettings) error {
 	fileLock := flock.New(lockPath)
 
 	success, err := fileLock.TryLock()
@@ -53,7 +54,11 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 
 	// Create/Update entry pages
 	for _, p := range pending {
-		result, err := syncPendingEntry(ctx, *notionContext.EntriesDataSourceID, p, s, m, clock, attemptedAtUTC)
+		result, err := syncWithRetry(ctx, *notionContext.EntriesDataSourceID, p, s, m, clock, attemptedAtUTC, syncPendingEntry, retrySettings)
+		if err != nil {
+			result, err = handleSyncError(err)
+		}
+
 		if err != nil {
 			return err
 		}
@@ -72,6 +77,7 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 // the current time
 type clock interface {
 	NowUTC() time.Time
+	Sleep(ctx context.Context, d time.Duration) error
 }
 
 // notionEntryManager is an interface that allows for testability of sync package functions
@@ -109,7 +115,7 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 	if entryPageID == nil {
 		entryPage, found, err := m.FindEntryPage(ctx, entriesDataSourceID, "Local ID", e.ID)
 		if err != nil {
-			return handleSyncError(err)
+			return syncResult{}, err
 		}
 		if found {
 			entryPageID = &entryPage.ID
@@ -130,7 +136,7 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 		entryPageID, err = createPage(ctx, m, entriesDataSourceID, entryPageID, title, description, e)
 	}
 	if err != nil {
-		return handleSyncError(err)
+		return syncResult{}, err
 	}
 
 	// success case
@@ -141,10 +147,15 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 // handleSyncError maps an error encountered during a sync operation to Notion to a syncResult,
 // which should then be used to update the entry in the database accordingly
 func handleSyncError(err error) (syncResult, error) {
-	// TODO handle too many request errors with retries, for now fail the sync
 	var tooManyReq *notion.TooManyRequestsError
 	if errors.As(err, &tooManyReq) {
-		return syncResult{}, &clierr.Error{Code: clierr.Offline, Message: "notion unresponsive, too many requests", Cause: err}
+		// if this error gets here it must have failed its max retry attempts
+		// recorded as a failure to try again next run
+		return syncResultFailed(tooManyReq.Error()), nil
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return syncResult{}, &clierr.Error{Code: clierr.Cancelled, Message: "sync run was cancelled"}
 	}
 
 	if errors.Is(err, notion.ErrDataSourceUnusable) {
@@ -296,4 +307,64 @@ func trashPage(ctx context.Context, m notionEntryManager, entriesDataSourceID st
 	}
 
 	return err
+}
+
+type syncOperation func(ctx context.Context, entriesDataSourceID string, e store.Entry, s *store.Store, m notionEntryManager, clock clock, attemptedAtUTC time.Time) (syncResult, error)
+
+// RetrySettings encapsulates all settings required to handle automatic retries
+// of sync-related requests to Notion
+type RetrySettings struct {
+	maxAttempts int
+	base        time.Duration
+	cap         time.Duration
+	rnd         *rand.Rand
+}
+
+// DefaultRetrySettings builds RetrySettings with default values,
+// using the provided rand.Source for jitter
+func DefaultRetrySettings(source rand.Source) RetrySettings {
+	return RetrySettings{
+		maxAttempts: 5,
+		base:        1 * time.Second,
+		cap:         30 * time.Second,
+		rnd:         rand.New(source),
+	}
+}
+
+// syncWithRetry wraps the pending sync entry operation with retries if a 429 error is found
+func syncWithRetry(ctx context.Context, entriesDataSourceID string, e store.Entry, s *store.Store, m notionEntryManager, clock clock, attemptedAtUTC time.Time, syncOp syncOperation, settings RetrySettings) (syncResult, error) {
+	var res syncResult
+	var err error
+	for i := 1; i <= settings.maxAttempts; i++ {
+		res, err = syncOp(ctx, entriesDataSourceID, e, s, m, clock, attemptedAtUTC)
+
+		if i == settings.maxAttempts {
+			return res, err
+		}
+
+		var tooManyReq *notion.TooManyRequestsError
+		if errors.As(err, &tooManyReq) {
+			var wait time.Duration
+
+			// Retry received in response
+			if tooManyReq.RetryAfterSeconds != nil {
+				wait = time.Duration(*tooManyReq.RetryAfterSeconds) * time.Second
+			} else {
+				// No retry specified, fall back to our own wait time + jitter
+				bound := min(settings.cap, settings.base<<(i-1))
+				wait = time.Duration(settings.rnd.Int64N(int64(bound)))
+			}
+
+			sleepErr := clock.Sleep(ctx, wait)
+			if sleepErr != nil {
+				return syncResult{}, sleepErr
+			}
+			continue
+		}
+
+		// no TooManyRequestsError, return result
+		return res, err
+	}
+
+	return res, err
 }

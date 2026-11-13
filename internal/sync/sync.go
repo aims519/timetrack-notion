@@ -226,25 +226,28 @@ func trashPage(ctx context.Context, m notionEntryManager, entriesDataSourceID st
 // RetrySettings encapsulates all settings required to handle automatic retries
 // of sync-related requests to Notion
 type RetrySettings struct {
-	maxAttempts int
-	base        time.Duration
-	cap         time.Duration
-	rnd         *rand.Rand
+	maxAttempts        int
+	maxNetworkFailures int
+	base               time.Duration
+	cap                time.Duration
+	rnd                *rand.Rand
 }
 
 // DefaultRetrySettings builds RetrySettings with default values,
 // using the provided rand.Source for jitter
 func DefaultRetrySettings(source rand.Source) RetrySettings {
 	return RetrySettings{
-		maxAttempts: 5,
-		base:        1 * time.Second,
-		cap:         30 * time.Second,
-		rnd:         rand.New(source),
+		maxAttempts:        5,
+		maxNetworkFailures: 3,
+		base:               1 * time.Second,
+		cap:                30 * time.Second,
+		rnd:                rand.New(source),
 	}
 }
 
-// withRetry wraps calls to Notion that should be retried in the event of a 429 or 5xx response
-func withRetry[T any](ctx context.Context, clock clock, settings RetrySettings, op func() (T, error)) (T, error) {
+// withRetry wraps calls to Notion that should be retried in the event of a 429 or 5xx response.
+// If the network failure count reaches the max allowed, latest error is returned without a retry
+func withRetry[T any](ctx context.Context, clock clock, settings RetrySettings, networkFailures *int, op func() (T, error)) (T, error) {
 	var res T
 	var err error
 	for i := 1; i <= settings.maxAttempts; i++ {
@@ -269,6 +272,15 @@ func withRetry[T any](ctx context.Context, clock clock, settings RetrySettings, 
 				wait = backOffWait(settings.base, settings.cap, i, settings.rnd)
 			}
 		case errors.Is(err, notion.ErrServerError):
+			wait = backOffWait(settings.base, settings.cap, i, settings.rnd)
+		case errors.Is(err, notion.ErrNetworkFailure):
+			if networkFailures != nil {
+				*networkFailures++
+				if *networkFailures >= settings.maxNetworkFailures {
+					return res, err
+				}
+			}
+
 			wait = backOffWait(settings.base, settings.cap, i, settings.rnd)
 		default:
 			// no retry needed

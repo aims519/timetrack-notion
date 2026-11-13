@@ -61,10 +61,19 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		return nil
 	}
 
+	// track consecutive network failures, abort the run if threshold is met
+	networkErrorCount := 0
+
 	// Check data source exists, abort if not (after retries)
-	_, err = withRetry(ctx, clock, retrySettings, func() (interface{}, error) {
+	// Abort on first network failure in this case
+	firstRequestSettings := retrySettings
+	firstRequestSettings.maxNetworkFailures = 1
+	_, err = withRetry(ctx, clock, firstRequestSettings, &networkErrorCount, func() (any, error) {
 		return nil, checkDataSource(ctx, m, *notionContext.EntriesDataSourceID)
 	})
+	if err != nil && networkErrorCount >= retrySettings.maxNetworkFailures {
+		return err
+	}
 	if err != nil {
 		return err
 	}
@@ -77,9 +86,12 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 			return err
 		}
 
-		result, err := withRetry(ctx, clock, retrySettings, func() (syncResult, error) {
+		result, err := withRetry(ctx, clock, retrySettings, &networkErrorCount, func() (syncResult, error) {
 			return syncPendingEntry(ctx, *notionContext.EntriesDataSourceID, p, m, clock)
 		})
+		if err != nil && networkErrorCount >= retrySettings.maxNetworkFailures {
+			return err
+		}
 		if err != nil {
 			result, err = handleSyncError(err)
 		}
@@ -87,6 +99,9 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		if err != nil {
 			return err
 		}
+
+		// reset network failure counter following success
+		networkErrorCount = 0
 
 		// update db entry with synced_at, sync_error, sync_state
 		_, err = s.CompleteSync(ctx, p.ID, result.Status, result.SyncError, result.EntryPageID, p.UpdatedAt, result.SyncedAt)

@@ -281,6 +281,9 @@ func checkCode(t *testing.T, err error, want clierr.ErrorCode) {
 // serverError is the error the client returns for a 5xx
 var serverError = &clierr.Error{Code: clierr.Internal, Message: "server error returned from Notion", Cause: notion.ErrServerError}
 
+// networkFailure is the error the client returns when a request gets no response from Notion
+var networkFailure = &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: notion.ErrNetworkFailure}
+
 // rateLimited is the error the client returns for a 429, with the Retry-After seconds Notion sent
 func rateLimited(retryAfterSeconds int) error {
 	return &clierr.Error{

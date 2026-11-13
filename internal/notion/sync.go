@@ -16,6 +16,10 @@ import (
 // a time entries data source request fails with a 404 or 400, so that the run can be aborted
 var ErrDataSourceUnusable = errors.New("entries data source is unusable")
 
+// ErrNetworkFailure is returned from requests to Notion that fail due to a networking issue, rather than anything to
+// do with the request itself
+var ErrNetworkFailure = errors.New("request failed due to networking error")
+
 // obj is a type alias for a map, used to construct
 // JSON requests
 type obj = map[string]any

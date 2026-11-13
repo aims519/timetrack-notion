@@ -457,7 +457,9 @@ func TestRun_RateLimited_Backoff(t *testing.T) {
 
 // A 5xx is retried with full-jitter backoff, as Notion sends no Retry-After for it, and the entry
 // is marked failed once the attempts are spent (§6.3). Other internal errors, such as a response
-// that can't be parsed, would fail the same way again, so they aren't retried
+// that can't be parsed, would fail the same way again, so they aren't retried. Notion can save a
+// write and still answer 5xx, so the retry's Local ID lookup adopts the saved page rather than
+// creating a second one (§6.2)
 func TestRun_ServerError_Retries(t *testing.T) {
 	unparseable := &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response"}
 
@@ -465,7 +467,10 @@ func TestRun_ServerError_Retries(t *testing.T) {
 		name         string
 		createErr    error   // every create fails with this
 		createErrSeq []error // or the first creates fail with these, then succeed
+		savesPage    bool    // a failed create still saves the page "page-saved" in Notion
 		wantAttempts int
+		wantCreates  int
+		wantUpdates  []string        // page IDs updated for the erroring entry
 		wantBounds   []time.Duration // one per wait
 		wantState    string
 		wantPageID   string
@@ -474,6 +479,7 @@ func TestRun_ServerError_Retries(t *testing.T) {
 			name:         "every_attempt",
 			createErr:    serverError,
 			wantAttempts: testRetrySettings().maxAttempts,
+			wantCreates:  testRetrySettings().maxAttempts,
 			wantBounds:   []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second},
 			wantState:    "failed",
 		},
@@ -481,11 +487,23 @@ func TestRun_ServerError_Retries(t *testing.T) {
 			name:         "once_then_success",
 			createErrSeq: []error{serverError},
 			wantAttempts: 2,
+			wantCreates:  2,
 			wantBounds:   []time.Duration{1 * time.Second},
 			wantState:    "synced",
 			wantPageID:   "page-1",
 		},
-		{name: "not_retryable", createErr: unparseable, wantAttempts: 1, wantState: "failed"},
+		{
+			name:         "saved_despite_error",
+			createErrSeq: []error{serverError},
+			savesPage:    true,
+			wantAttempts: 2,
+			wantCreates:  1,
+			wantUpdates:  []string{"page-saved"},
+			wantBounds:   []time.Duration{1 * time.Second},
+			wantState:    "synced",
+			wantPageID:   "page-saved",
+		},
+		{name: "not_retryable", createErr: unparseable, wantAttempts: 1, wantCreates: 1, wantState: "failed"},
 	}
 
 	for _, tc := range tests {
@@ -500,6 +518,13 @@ func TestRun_ServerError_Retries(t *testing.T) {
 			if tc.createErrSeq != nil {
 				m.createErrSeq = map[string][]error{erroring.ID: tc.createErrSeq}
 			}
+			if tc.savesPage {
+				m.onCreate = func(localID string) {
+					if localID == erroring.ID {
+						m.foundPages = map[string]notion.Page{erroring.ID: {ID: "page-saved"}}
+					}
+				}
+			}
 			c := runClock(0)
 
 			if err := Run(t.Context(), st, m, c, lockPath, testRetrySettings()); err != nil {
@@ -513,8 +538,17 @@ func TestRun_ServerError_Retries(t *testing.T) {
 			for _, call := range m.creates {
 				creates = append(creates, call.localID)
 			}
-			if got := count(creates, erroring.ID); got != tc.wantAttempts {
-				t.Errorf("CreateEntryPage called %d times for the erroring entry, want %d", got, tc.wantAttempts)
+			if got := count(creates, erroring.ID); got != tc.wantCreates {
+				t.Errorf("CreateEntryPage called %d times for the erroring entry, want %d", got, tc.wantCreates)
+			}
+			var updates []string
+			for _, call := range m.updates {
+				if call.localID == erroring.ID {
+					updates = append(updates, call.pageID)
+				}
+			}
+			if !slices.Equal(updates, tc.wantUpdates) {
+				t.Errorf("UpdateEntryPage page IDs for the erroring entry = %v, want %v", updates, tc.wantUpdates)
 			}
 			if len(c.sleeps) != len(tc.wantBounds) {
 				t.Fatalf("waits = %v, want %d of them", c.sleeps, len(tc.wantBounds))

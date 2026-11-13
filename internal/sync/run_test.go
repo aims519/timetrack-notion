@@ -693,6 +693,10 @@ func TestRun_NetworkFailures(t *testing.T) {
 				}
 			} else {
 				checkCode(t, err, tc.wantCode)
+				// The run stops on the client's own error, so the reason for the failure isn't lost
+				if !errors.Is(err, notion.ErrNetworkFailure) {
+					t.Errorf("Run() = %v, want it to wrap notion.ErrNetworkFailure", err)
+				}
 			}
 
 			var creates []string

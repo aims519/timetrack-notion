@@ -257,6 +257,11 @@ func withRetry[T any](ctx context.Context, clock clock, settings RetrySettings, 
 			return res, &clierr.Error{Code: clierr.Cancelled, Message: "operation was cancelled", Cause: err}
 		}
 
+		// bump network failure count to ensure correct count is recorded before any early returns
+		if errors.Is(err, notion.ErrNetworkFailure) && networkFailures != nil {
+			*networkFailures++
+		}
+
 		if i == settings.maxAttempts {
 			return res, err
 		}
@@ -274,11 +279,8 @@ func withRetry[T any](ctx context.Context, clock clock, settings RetrySettings, 
 		case errors.Is(err, notion.ErrServerError):
 			wait = backOffWait(settings.base, settings.cap, i, settings.rnd)
 		case errors.Is(err, notion.ErrNetworkFailure):
-			if networkFailures != nil {
-				*networkFailures++
-				if *networkFailures >= settings.maxNetworkFailures {
-					return res, err
-				}
+			if networkFailures != nil && *networkFailures >= settings.maxNetworkFailures {
+				return res, err
 			}
 
 			wait = backOffWait(settings.base, settings.cap, i, settings.rnd)

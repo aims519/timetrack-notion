@@ -322,7 +322,8 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, v 
 
 	respBody, err := io.ReadAll(res.Body)
 	if err != nil {
-		return &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+		cause := fmt.Errorf("%w: %w", ErrNetworkFailure, err)
+		return &clierr.Error{Code: clierr.Offline, Message: "unable to read response from Notion", Cause: cause}
 	}
 
 	err = handleErrorResponse(res, respBody)

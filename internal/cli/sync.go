@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"math/rand/v2"
 	"os"
 	"time"
 
@@ -25,7 +27,8 @@ func newSyncCmd(a *app) *cobra.Command {
 			}
 			notionClient := notion.NewClient(a.notionBaseURL, token, a.notionHTTPClient)
 
-			return sync.Run(cmd.Context(), a.db, notionClient, &syncClock{}, lockFilePath)
+			retrySettings := sync.DefaultRetrySettings(rand.NewPCG(rand.Uint64(), rand.Uint64()))
+			return sync.Run(cmd.Context(), a.db, notionClient, &syncClock{}, lockFilePath, retrySettings)
 		},
 	}
 
@@ -48,4 +51,17 @@ type syncClock struct{}
 // NowUTC returns the current time in UTC
 func (c *syncClock) NowUTC() time.Time {
 	return time.Now().UTC()
+}
+
+// Sleep starts a timer and waits for it to complete, interrupting if the given
+// context is cancelled
+func (c *syncClock) Sleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

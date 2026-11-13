@@ -186,7 +186,6 @@ func TestRun_Sync_AbortsRun(t *testing.T) {
 	var (
 		dataSourceOK  = entriesLinkedTo("tasks-ds")
 		unauthorized  = notionResponse{http.StatusUnauthorized, `{"object": "error", "status": 401, "code": "unauthorized", "message": "API token is invalid."}`}
-		rateLimited   = notionResponse{http.StatusTooManyRequests, `{"object": "error", "status": 429, "code": "rate_limited", "message": "Rate limited"}`}
 		notFoundError = notionResponse{http.StatusNotFound, `{"object": "error", "status": 404, "code": "object_not_found", "message": "Could not find data source."}`}
 		badRequest    = notionResponse{http.StatusBadRequest, `{"object": "error", "status": 400, "code": "validation_error", "message": "Could not find property with name or id: Local ID"}`}
 	)
@@ -238,13 +237,6 @@ func TestRun_Sync_AbortsRun(t *testing.T) {
 			wantRequested: []string{entriesDataSourcePath, entriesQueryPath},
 			wantExit:      2,
 			wantCode:      clierr.Usage,
-		},
-		{
-			name:          "rate_limited",
-			responses:     map[string]notionResponse{entriesDataSourcePath: dataSourceOK, entriesQueryPath: rateLimited},
-			wantRequested: []string{entriesDataSourcePath, entriesQueryPath},
-			wantExit:      6,
-			wantCode:      clierr.Offline,
 		},
 	}
 

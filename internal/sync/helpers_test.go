@@ -25,7 +25,8 @@ var (
 )
 
 // fakeClock satisfies the clock interface Run needs, for testing. Sleep records the wait and
-// returns at once, with sleepErr standing in for a context cancelled during the wait
+// returns at once. Like the real clock, it returns the context's error when the context it's
+// given is done; otherwise sleepErr stands in for a context cancelled during the wait
 type fakeClock struct {
 	nowUTC   time.Time
 	sleepErr error
@@ -38,6 +39,9 @@ func (fc *fakeClock) NowUTC() time.Time {
 
 func (fc *fakeClock) Sleep(ctx context.Context, d time.Duration) error {
 	fc.sleeps = append(fc.sleeps, d)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return fc.sleepErr
 }
 
@@ -95,6 +99,9 @@ type fakeEntryManager struct {
 
 func (f *fakeEntryManager) GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error) {
 	f.dataSources = append(f.dataSources, dataSourceID)
+	if err := abandoned(ctx); err != nil {
+		return notion.DataSource{}, err
+	}
 	if len(f.dataSourceErrSeq) > 0 {
 		err := f.dataSourceErrSeq[0]
 		f.dataSourceErrSeq = f.dataSourceErrSeq[1:]
@@ -117,6 +124,9 @@ func (f *fakeEntryManager) GetDataSource(ctx context.Context, dataSourceID strin
 
 func (f *fakeEntryManager) FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (notion.Page, bool, error) {
 	f.finds = append(f.finds, localIDValue)
+	if err := abandoned(ctx); err != nil {
+		return notion.Page{}, false, err
+	}
 	if err := f.findErr[localIDValue]; err != nil {
 		return notion.Page{}, false, err
 	}
@@ -129,6 +139,10 @@ func (f *fakeEntryManager) CreateEntryPage(ctx context.Context, dataSourceID, ti
 	f.creates = append(f.creates, entryPageCall{dataSourceID: dataSourceID, title: title, description: description, localID: localID, taskPageID: taskPageID, start: start, end: end})
 	if f.onCreate != nil {
 		f.onCreate(localID)
+	}
+	// After onCreate, so a cancel there arrives while this create is in flight
+	if err := abandoned(ctx); err != nil {
+		return notion.Page{}, err
 	}
 	if seq := f.createErrSeq[localID]; len(seq) > 0 {
 		f.createErrSeq[localID] = seq[1:]
@@ -145,6 +159,9 @@ func (f *fakeEntryManager) CreateEntryPage(ctx context.Context, dataSourceID, ti
 
 func (f *fakeEntryManager) UpdateEntryPage(ctx context.Context, pageID, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error) {
 	f.updates = append(f.updates, entryPageCall{pageID: pageID, dataSourceID: dataSourceID, title: title, description: description, localID: localID, taskPageID: taskPageID, start: start, end: end})
+	if err := abandoned(ctx); err != nil {
+		return notion.Page{}, err
+	}
 	if err := f.updateErr[localID]; err != nil {
 		return notion.Page{}, err
 	}
@@ -154,6 +171,9 @@ func (f *fakeEntryManager) UpdateEntryPage(ctx context.Context, pageID, dataSour
 
 func (f *fakeEntryManager) TrashEntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error) {
 	f.trashes = append(f.trashes, pageID)
+	if err := abandoned(ctx); err != nil {
+		return notion.Page{}, err
+	}
 	if err := f.trashErr[pageID]; err != nil {
 		return notion.Page{}, err
 	}
@@ -163,11 +183,24 @@ func (f *fakeEntryManager) TrashEntryPage(ctx context.Context, pageID, dataSourc
 
 func (f *fakeEntryManager) EntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error) {
 	f.retrieves = append(f.retrieves, pageID)
+	if err := abandoned(ctx); err != nil {
+		return notion.Page{}, err
+	}
 	if err := f.entryPageErr[pageID]; err != nil {
 		return notion.Page{}, err
 	}
 
 	return f.entryPages[pageID], nil
+}
+
+// abandoned returns requestCancelled when ctx is done, as the client does for a request whose
+// context is cancelled before it gets an answer, and nil otherwise. Every fake request checks it
+// after recording the call, so a request is counted even when it's abandoned
+func abandoned(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return requestCancelled
+	}
+	return nil
 }
 
 // requests counts every Notion request the fake has answered

@@ -4,6 +4,8 @@ import (
 	"context"
 	"math/rand/v2"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -18,6 +20,10 @@ func newSyncCmd(a *app) *cobra.Command {
 		Use:   "sync",
 		Short: "sync local tracked entries with Notion",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Allow CTRL+C to send a cancellation during a sync run
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
 			lockFilePath := syncLockFilePath(a.dbFilePath)
 
 			token := os.Getenv("NOTION_TOKEN")
@@ -28,7 +34,7 @@ func newSyncCmd(a *app) *cobra.Command {
 			notionClient := notion.NewClient(a.notionBaseURL, token, a.notionHTTPClient)
 
 			retrySettings := sync.DefaultRetrySettings(rand.NewPCG(rand.Uint64(), rand.Uint64()))
-			return sync.Run(cmd.Context(), a.db, notionClient, &syncClock{}, lockFilePath, retrySettings)
+			return sync.Run(ctx, a.db, notionClient, &syncClock{}, lockFilePath, retrySettings)
 		},
 	}
 

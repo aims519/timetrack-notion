@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/aims519/timetrack-notion/internal/clierr"
@@ -75,16 +76,22 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		return err
 	}
 
-	// Create/Update entry pages
+	// Process each pending entry. ctxNoCancel where requests need to be allowed to complete
+	ctxNoCancel := context.WithoutCancel(ctx)
 	for _, p := range pending {
+		// cancellation takes effect here, between entries
+		if err := ctx.Err(); errors.Is(err, context.Canceled) {
+			return cancelled(err)
+		}
+
 		// set create_attempted_at, outside of retry logic
-		err := s.SyncAttempt(ctx, p.ID, attemptedAtUTC)
+		err := s.SyncAttempt(ctxNoCancel, p.ID, attemptedAtUTC)
 		if err != nil {
 			return err
 		}
 
 		result, err := withRetry(ctx, clock, retrySettings, &networkErrorCount, func() (syncResult, error) {
-			return syncPendingEntry(ctx, *notionContext.EntriesDataSourceID, p, m, clock)
+			return syncPendingEntry(ctxNoCancel, *notionContext.EntriesDataSourceID, p, m, clock)
 		})
 		if err != nil && networkErrorCount >= retrySettings.maxNetworkFailures {
 			return err
@@ -101,11 +108,21 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		networkErrorCount = 0
 
 		// update db entry with synced_at, sync_error, sync_state
-		_, err = s.CompleteSync(ctx, p.ID, result.Status, result.SyncError, result.EntryPageID, p.UpdatedAt, result.SyncedAt)
+		_, err = s.CompleteSync(ctxNoCancel, p.ID, result.Status, result.SyncError, result.EntryPageID, p.UpdatedAt, result.SyncedAt)
 		if err != nil {
 			return err
 		}
 	}
 
+	// covers cancellation sent during successful processing of last pending entry
+	if err := ctx.Err(); errors.Is(err, context.Canceled) {
+		return cancelled(err)
+	}
+
 	return nil
+}
+
+// cancelled is a helper that returns a cancelled error since it's needed in several places
+func cancelled(err error) error {
+	return &clierr.Error{Code: clierr.Cancelled, Message: "sync run cancelled", Cause: err}
 }

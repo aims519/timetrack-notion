@@ -71,9 +71,6 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 	_, err = withRetry(ctx, clock, firstRequestSettings, &networkErrorCount, func() (any, error) {
 		return nil, checkDataSource(ctx, m, *notionContext.EntriesDataSourceID)
 	})
-	if err != nil && networkErrorCount >= retrySettings.maxNetworkFailures {
-		return err
-	}
 	if err != nil {
 		return err
 	}

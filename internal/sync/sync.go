@@ -10,100 +10,10 @@ import (
 	"github.com/aims519/timetrack-notion/internal/clierr"
 	"github.com/aims519/timetrack-notion/internal/notion"
 	"github.com/aims519/timetrack-notion/internal/store"
-	"github.com/gofrs/flock"
 )
 
-// Run executes all pending sync operations from the database. Will fail with sync_busy
-// if another process holds the lock
-func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock, lockPath string, retrySettings RetrySettings) error {
-	fileLock := flock.New(lockPath)
-
-	success, err := fileLock.TryLock()
-	if err != nil {
-		return &clierr.Error{Code: clierr.Internal, Message: "unable to acquire sync lock", Cause: err, Details: map[string]any{"lock_path": lockPath}}
-	}
-	if !success {
-		return &clierr.Error{Code: clierr.SyncBusy, Message: "another sync operation is in progress"}
-	}
-
-	defer func() { _ = fileLock.Unlock() }()
-	attemptedAtUTC := clock.NowUTC()
-
-	// Fetch pending entries from Notion
-	notionContext, err := s.NotionContext(ctx, store.DefaultContextID)
-	if err != nil {
-		return err
-	}
-	if notionContext.EntriesDataSourceID == nil {
-		return &clierr.Error{Code: clierr.NotInitialised, Message: "Notion context not fully initialised, run 'tt init'"}
-	}
-
-	pending, err := s.PendingEntries(ctx, store.DefaultContextID)
-	if err != nil {
-		return err
-	}
-	if len(pending) == 0 {
-		return nil
-	}
-
-	// Check data source exists, abort if not (after retries)
-	_, err = withRetry(ctx, clock, retrySettings, func() (interface{}, error) {
-		return nil, checkDataSource(ctx, m, *notionContext.EntriesDataSourceID)
-	})
-	if err != nil {
-		return err
-	}
-
-	// Create/Update entry pages
-	for _, p := range pending {
-		result, err := withRetry(ctx, clock, retrySettings, func() (syncResult, error) {
-			return syncPendingEntry(ctx, *notionContext.EntriesDataSourceID, p, s, m, clock, attemptedAtUTC)
-		})
-		if err != nil {
-			result, err = handleSyncError(err)
-		}
-
-		if err != nil {
-			return err
-		}
-
-		// update db entry with synced_at, sync_error, sync_state
-		_, err = s.CompleteSync(ctx, p.ID, result.Status, result.SyncError, result.EntryPageID, p.UpdatedAt, result.SyncedAt)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// clock is an interface to allow testability of code that requires
-// the current time
-type clock interface {
-	NowUTC() time.Time
-	Sleep(ctx context.Context, d time.Duration) error
-}
-
-// notionEntryManager is an interface that allows for testability of sync package functions
-// without requiring a real Notion client
-type notionEntryManager interface {
-	GetDataSource(ctx context.Context, dataSourceID string) (notion.DataSource, error)
-	EntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error)
-	FindEntryPage(ctx context.Context, entriesDataSourceID, localIDKey, localIDValue string) (notion.Page, bool, error)
-	CreateEntryPage(ctx context.Context, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
-	UpdateEntryPage(ctx context.Context, pageID, dataSourceID, title, description, localID, taskPageID string, start, end time.Time) (notion.Page, error)
-	TrashEntryPage(ctx context.Context, pageID, dataSourceID string) (notion.Page, error)
-}
-
-// syncPendingEntry updates Notion with the details of a pending entry, and records the sync result
-// in the database
-func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.Entry, s *store.Store, m notionEntryManager, clock clock, attemptedAtUTC time.Time) (syncResult, error) {
-	// set create_attempted_at
-	err := s.SyncAttempt(ctx, e.ID, attemptedAtUTC)
-	if err != nil {
-		return syncResult{}, err
-	}
-
+// syncPendingEntry updates Notion with the details of a pending entry
+func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.Entry, m notionEntryManager, clock clock) (syncResult, error) {
 	// default title to description, else task name
 	var title string
 	var description string
@@ -132,6 +42,7 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 		return syncResultSuccess(entryPageID, syncedAt), nil
 	}
 
+	var err error
 	if entryPageID != nil && e.DeletedAt == nil {
 		err = updatePage(ctx, m, entriesDataSourceID, *entryPageID, title, description, e)
 	} else if entryPageID != nil && e.DeletedAt != nil {
@@ -159,7 +70,7 @@ func handleSyncError(err error) (syncResult, error) {
 	}
 
 	if errors.Is(err, context.Canceled) {
-		return syncResult{}, &clierr.Error{Code: clierr.Cancelled, Message: "sync run was cancelled"}
+		return syncResult{}, &clierr.Error{Code: clierr.Cancelled, Message: "sync run was cancelled", Cause: err}
 	}
 
 	if errors.Is(err, notion.ErrDataSourceUnusable) {
@@ -227,8 +138,7 @@ func syncResultBlocked(syncError string) syncResult {
 }
 
 // checkDataSource returns an error if the entries data source is missing or trashed in Notion,
-// wrapping ErrDataSourceUnusable, or if Notion couldn't be asked. At the start of a run any
-// error stops the run; after a page 404 the error goes through handleSyncError
+// wrapping ErrDataSourceUnusable, or if Notion couldn't be asked
 func checkDataSource(ctx context.Context, m notionEntryManager, dataSourceID string) error {
 	ds, err := m.GetDataSource(ctx, dataSourceID)
 	var cliErr *clierr.Error
@@ -340,43 +250,38 @@ func withRetry[T any](ctx context.Context, clock clock, settings RetrySettings, 
 	for i := 1; i <= settings.maxAttempts; i++ {
 		res, err = op()
 
+		if errors.Is(err, context.Canceled) {
+			return res, &clierr.Error{Code: clierr.Cancelled, Message: "operation was cancelled", Cause: err}
+		}
+
 		if i == settings.maxAttempts {
 			return res, err
 		}
 
+		var wait time.Duration
 		var tooManyReq *notion.TooManyRequestsError
-		if errors.As(err, &tooManyReq) {
-			var wait time.Duration
-
-			// Retry received in response
+		switch {
+		case errors.As(err, &tooManyReq):
 			if tooManyReq.RetryAfterSeconds != nil {
 				wait = time.Duration(*tooManyReq.RetryAfterSeconds) * time.Second
 			} else {
 				// No retry specified, fall back to our own wait time + jitter
 				wait = backOffWait(settings.base, settings.cap, i, settings.rnd)
 			}
-
-			sleepErr := clock.Sleep(ctx, wait)
-			if sleepErr != nil {
-				return res, sleepErr
-			}
-			continue
+		case errors.Is(err, notion.ErrServerError):
+			wait = backOffWait(settings.base, settings.cap, i, settings.rnd)
+		default:
+			// no retry needed
+			return res, err
 		}
 
-		// Retry 5xx errors and fail on last attempt
-		if errors.Is(err, notion.ErrServerError) {
-			wait := backOffWait(settings.base, settings.cap, i, settings.rnd)
-
-			sleepErr := clock.Sleep(ctx, wait)
-			if sleepErr != nil {
-				return res, sleepErr
-			}
-
-			continue
+		sleepErr := clock.Sleep(ctx, wait)
+		if errors.Is(sleepErr, context.Canceled) {
+			return res, &clierr.Error{Code: clierr.Cancelled, Message: "retry wait operation was cancelled", Cause: sleepErr}
 		}
-
-		// case not eligible for retry
-		return res, err
+		if sleepErr != nil {
+			return res, sleepErr
+		}
 	}
 
 	return res, err

@@ -759,6 +759,13 @@ func TestRun_CancelledDuringEntry(t *testing.T) {
 			wantStates:  []string{"synced", "synced", "pending"},
 		},
 		{
+			// Every entry is synced, but the run still reports the cancel rather than success
+			name:        "create_succeeds_on_the_last_entry",
+			cancelOn:    2,
+			wantCreates: []int{1, 1, 1},
+			wantStates:  []string{"synced", "synced", "synced"},
+		},
+		{
 			name:        "create_rate_limited",
 			cancelOn:    0,
 			createErr:   map[int]error{0: rateLimited(2)},

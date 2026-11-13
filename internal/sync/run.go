@@ -81,7 +81,7 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 	for _, p := range pending {
 		// cancellation takes effect here, between entries
 		if err := ctx.Err(); errors.Is(err, context.Canceled) {
-			return &clierr.Error{Code: clierr.Cancelled, Message: "sync run cancelled", Cause: err}
+			return cancelled(err)
 		}
 
 		// set create_attempted_at, outside of retry logic
@@ -114,5 +114,15 @@ func Run(ctx context.Context, s *store.Store, m notionEntryManager, clock clock,
 		}
 	}
 
+	// covers cancellation sent during successful processing of last pending entry
+	if err := ctx.Err(); errors.Is(err, context.Canceled) {
+		return cancelled(err)
+	}
+
 	return nil
+}
+
+// cancelled is a helper that returns a cancelled error since it's needed in several places
+func cancelled(err error) error {
+	return &clierr.Error{Code: clierr.Cancelled, Message: "sync run cancelled", Cause: err}
 }

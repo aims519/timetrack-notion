@@ -309,19 +309,21 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, v 
 
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return &clierr.Error{Code: clierr.Internal, Message: "unable to communicate with Notion", Cause: err}
+		return &clierr.Error{Code: clierr.Internal, Message: "unable to build Notion request", Cause: err}
 	}
 	addDefaultHeaders(req, c.apiVersion, c.apiToken)
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: err}
+		cause := fmt.Errorf("%w: %w", ErrNetworkFailure, err)
+		return &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion", Cause: cause}
 	}
 	defer res.Body.Close()
 
 	respBody, err := io.ReadAll(res.Body)
 	if err != nil {
-		return &clierr.Error{Code: clierr.Internal, Message: "unable to read response from Notion", Cause: err}
+		cause := fmt.Errorf("%w: %w", ErrNetworkFailure, err)
+		return &clierr.Error{Code: clierr.Offline, Message: "unable to read response from Notion", Cause: cause}
 	}
 
 	err = handleErrorResponse(res, respBody)

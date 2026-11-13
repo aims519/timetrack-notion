@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -585,6 +586,233 @@ func TestRun_RateLimited_CancelledDuringWait(t *testing.T) {
 	checkStored(t, st, next.ID, "pending", "")
 }
 
+// A network failure mid-run is retried with backoff. testRetrySettings().maxNetworkFailures in a
+// row, counted per attempt and across entries, stop the run with offline. Nothing is recorded for
+// the entry that hit the last one, so it and every entry after it stay pending, while entries
+// already synced keep their result. Any success resets the count (§6.3, question 18)
+func TestRun_NetworkFailures(t *testing.T) {
+	// Entries are synced in start order, so index 0 is reached first
+	tests := []struct {
+		name         string
+		findErr      map[int]error   // every lookup for the entry fails with this
+		createErr    map[int]error   // every create for the entry fails with this
+		createErrSeq map[int][]error // or the entry's first creates fail with these, then succeed
+		wantFinds    []int           // lookups per entry, one per attempt
+		wantCreates  []int           // creates per entry
+		wantBounds   []time.Duration // one per wait
+		wantCode     clierr.ErrorCode
+		wantStates   []string // a synced entry holds page-1
+	}{
+		{
+			name:        "every_attempt",
+			createErr:   map[int]error{0: networkFailure},
+			wantFinds:   []int{3, 0, 0},
+			wantCreates: []int{3, 0, 0},
+			wantBounds:  []time.Duration{1 * time.Second, 2 * time.Second},
+			wantCode:    clierr.Offline,
+			wantStates:  []string{"pending", "pending", "pending"},
+		},
+		{
+			name:        "on_lookup",
+			findErr:     map[int]error{0: networkFailure},
+			wantFinds:   []int{3, 0, 0},
+			wantCreates: []int{0, 0, 0},
+			wantBounds:  []time.Duration{1 * time.Second, 2 * time.Second},
+			wantCode:    clierr.Offline,
+			wantStates:  []string{"pending", "pending", "pending"},
+		},
+		{
+			name:        "after_a_synced_entry",
+			createErr:   map[int]error{1: networkFailure},
+			wantFinds:   []int{1, 3, 0},
+			wantCreates: []int{1, 3, 0},
+			wantBounds:  []time.Duration{1 * time.Second, 2 * time.Second},
+			wantCode:    clierr.Offline,
+			wantStates:  []string{"synced", "pending", "pending"},
+		},
+		{
+			// The 5xxs are retried as usual, and the network failures after them still stop the run
+			name:         "after_server_errors",
+			createErrSeq: map[int][]error{0: {serverError, serverError, networkFailure, networkFailure, networkFailure}},
+			wantFinds:    []int{5, 0, 0},
+			wantCreates:  []int{5, 0, 0},
+			wantBounds:   []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second},
+			wantCode:     clierr.Offline,
+			wantStates:   []string{"pending", "pending", "pending"},
+		},
+		{
+			name:         "two_then_success",
+			createErrSeq: map[int][]error{0: {networkFailure, networkFailure}},
+			wantFinds:    []int{3, 1, 1},
+			wantCreates:  []int{3, 1, 1},
+			wantBounds:   []time.Duration{1 * time.Second, 2 * time.Second},
+			wantStates:   []string{"synced", "synced", "synced"},
+		},
+		{
+			// Four failures in all, but a success comes between each pair, so the count never reaches three
+			name:         "reset_by_success_across_entries",
+			createErrSeq: map[int][]error{0: {networkFailure, networkFailure}, 1: {networkFailure, networkFailure}},
+			wantFinds:    []int{3, 3, 1},
+			wantCreates:  []int{3, 3, 1},
+			wantBounds:   []time.Duration{1 * time.Second, 2 * time.Second, 1 * time.Second, 2 * time.Second},
+			wantStates:   []string{"synced", "synced", "synced"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			var entries []string
+			for i := range 3 {
+				offset := time.Duration(i) * 2 * time.Hour
+				entries = append(entries, seedStoppedEntry(t, st, nil, testStart.Add(offset), testEnd.Add(offset)).ID)
+			}
+
+			m := &fakeEntryManager{
+				createdPageID: "page-1",
+				findErr:       map[string]error{},
+				createErr:     map[string]error{},
+				createErrSeq:  map[string][]error{},
+			}
+			for i, err := range tc.findErr {
+				m.findErr[entries[i]] = err
+			}
+			for i, err := range tc.createErr {
+				m.createErr[entries[i]] = err
+			}
+			for i, seq := range tc.createErrSeq {
+				m.createErrSeq[entries[i]] = seq
+			}
+			c := runClock(0)
+
+			err := Run(t.Context(), st, m, c, lockPath, testRetrySettings())
+
+			if tc.wantCode == "" {
+				if err != nil {
+					t.Fatalf("Run() = %v, want nil", err)
+				}
+			} else {
+				checkCode(t, err, tc.wantCode)
+				// The run stops on the client's own error, so the reason for the failure isn't lost
+				if !errors.Is(err, notion.ErrNetworkFailure) {
+					t.Errorf("Run() = %v, want it to wrap notion.ErrNetworkFailure", err)
+				}
+			}
+
+			var creates []string
+			for _, call := range m.creates {
+				creates = append(creates, call.localID)
+			}
+			for i, id := range entries {
+				if got := count(m.finds, id); got != tc.wantFinds[i] {
+					t.Errorf("FindEntryPage called %d times for entry %d, want %d", got, i, tc.wantFinds[i])
+				}
+				if got := count(creates, id); got != tc.wantCreates[i] {
+					t.Errorf("CreateEntryPage called %d times for entry %d, want %d", got, i, tc.wantCreates[i])
+				}
+			}
+
+			if len(c.sleeps) != len(tc.wantBounds) {
+				t.Fatalf("waits = %v, want %d of them", c.sleeps, len(tc.wantBounds))
+			}
+			for i, wait := range c.sleeps {
+				if wait < 0 || wait >= tc.wantBounds[i] {
+					t.Errorf("wait %d = %v, want at least 0 and below %v", i+1, wait, tc.wantBounds[i])
+				}
+			}
+
+			for i, id := range entries {
+				wantPageID := ""
+				if tc.wantStates[i] == "synced" {
+					wantPageID = "page-1"
+				}
+				checkStored(t, st, id, tc.wantStates[i], wantPageID)
+			}
+		})
+	}
+}
+
+// Ctrl-C during an entry's request stops the run with cancelled, never offline: the client's error
+// also matches ErrNetworkFailure, but it isn't counted as one, even when it would be the
+// testRetrySettings().maxNetworkFailures-th in a row. Nothing is recorded for the entry, so it and
+// every entry after it stay pending, while entries already synced keep their result (§6.3)
+func TestRun_CancelledDuringRequest(t *testing.T) {
+	// Entries are synced in start order, so index 0 is reached first
+	tests := []struct {
+		name         string
+		createErrSeq map[int][]error // the entry's first creates fail with these, then succeed
+		wantCreates  []int           // creates per entry
+		wantWaits    int
+		wantStates   []string // a synced entry holds page-1
+	}{
+		{
+			name:         "first_attempt",
+			createErrSeq: map[int][]error{0: {requestCancelled}},
+			wantCreates:  []int{1, 0, 0},
+			wantStates:   []string{"pending", "pending", "pending"},
+		},
+		{
+			// Counted as a network failure, this would be the third in a row and stop the run offline
+			name:         "after_network_failures",
+			createErrSeq: map[int][]error{0: {networkFailure, networkFailure, requestCancelled}},
+			wantCreates:  []int{3, 0, 0},
+			wantWaits:    2,
+			wantStates:   []string{"pending", "pending", "pending"},
+		},
+		{
+			name:         "after_a_synced_entry",
+			createErrSeq: map[int][]error{1: {requestCancelled}},
+			wantCreates:  []int{1, 1, 0},
+			wantStates:   []string{"synced", "pending", "pending"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			var entries []string
+			for i := range 3 {
+				offset := time.Duration(i) * 2 * time.Hour
+				entries = append(entries, seedStoppedEntry(t, st, nil, testStart.Add(offset), testEnd.Add(offset)).ID)
+			}
+
+			m := &fakeEntryManager{createdPageID: "page-1", createErrSeq: map[string][]error{}}
+			for i, seq := range tc.createErrSeq {
+				m.createErrSeq[entries[i]] = seq
+			}
+			c := runClock(0)
+
+			err := Run(t.Context(), st, m, c, lockPath, testRetrySettings())
+
+			checkCode(t, err, clierr.Cancelled)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("Run() = %v, want it to wrap context.Canceled", err)
+			}
+
+			var creates []string
+			for _, call := range m.creates {
+				creates = append(creates, call.localID)
+			}
+			for i, id := range entries {
+				if got := count(creates, id); got != tc.wantCreates[i] {
+					t.Errorf("CreateEntryPage called %d times for entry %d, want %d", got, i, tc.wantCreates[i])
+				}
+			}
+			if len(c.sleeps) != tc.wantWaits {
+				t.Errorf("waits = %v, want %d of them", c.sleeps, tc.wantWaits)
+			}
+
+			for i, id := range entries {
+				wantPageID := ""
+				if tc.wantStates[i] == "synced" {
+					wantPageID = "page-1"
+				}
+				checkStored(t, st, id, tc.wantStates[i], wantPageID)
+			}
+		})
+	}
+}
+
 // A 429 or 5xx on the run's first data source check is retried like an entry's, as Notion did
 // answer. A network failure there means the first connection failed, so the run aborts at once
 // (§6.3). A check that never succeeds stops the run before any entry request, leaving it pending
@@ -612,6 +840,15 @@ func TestRun_DataSourceCheck_Retries(t *testing.T) {
 		{
 			name:       "offline",
 			firstErr:   &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"},
+			wantChecks: 1,
+			wantCode:   clierr.Offline,
+			wantState:  "pending",
+		},
+		{
+			// The error the client returns for no response: the first connection failed, so no retry
+			name:       "network_failure",
+			firstErr:   networkFailure,
+			laterErr:   networkFailure,
 			wantChecks: 1,
 			wantCode:   clierr.Offline,
 			wantState:  "pending",
@@ -661,11 +898,14 @@ func TestRun_DataSourceCheck_Retries(t *testing.T) {
 }
 
 // requestCancelled is the error the client returns when the context is cancelled during a
-// request: the HTTP client's *url.Error, wrapping context.Canceled, coded offline
+// request: coded offline, with a cause wrapping both ErrNetworkFailure and the HTTP client's
+// *url.Error, which wraps context.Canceled. It matches both, so the cancel must win over the
+// network failure
 var requestCancelled = &clierr.Error{
 	Code:    clierr.Offline,
 	Message: "unable to communicate with Notion",
-	Cause:   &url.Error{Op: "Get", URL: "https://api.notion.com/v1/data_sources/entries-ds", Err: context.Canceled},
+	Cause: fmt.Errorf("%w: %w", notion.ErrNetworkFailure,
+		&url.Error{Op: "Get", URL: "https://api.notion.com/v1/data_sources/entries-ds", Err: context.Canceled}),
 }
 
 // Ctrl-C during the run's first data source check stops the run with cancelled, whether it comes

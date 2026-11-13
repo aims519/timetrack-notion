@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,6 +78,10 @@ func (e *TooManyRequestsError) Error() string {
 	return "too many requests to Notion, no retry timing guidance available"
 }
 
+// ErrServerError is returned as the error cause for any response code >= 500
+// Sync retry logic checks for this error and retries accordingly
+var ErrServerError = errors.New("sync error: Notion server error")
+
 func handleErrorResponse(res *http.Response, b []byte) error {
 	if res.StatusCode == http.StatusOK {
 		return nil
@@ -86,6 +91,10 @@ func handleErrorResponse(res *http.Response, b []byte) error {
 	var messageDetailSuffix string
 	if err := json.Unmarshal(b, &e); err == nil && e.Message != "" {
 		messageDetailSuffix = fmt.Sprintf(": %q", e.Message)
+	}
+
+	if res.StatusCode >= 500 {
+		return &clierr.Error{Code: clierr.Internal, Message: "server error returned from Notion", Cause: ErrServerError}
 	}
 
 	switch res.StatusCode {
@@ -102,8 +111,6 @@ func handleErrorResponse(res *http.Response, b []byte) error {
 			retryAfterSeconds = &s
 		}
 		return &clierr.Error{Code: clierr.Offline, Message: fmt.Sprintf("too many requests to Notion%v", messageDetailSuffix), Cause: &TooManyRequestsError{RetryAfterSeconds: retryAfterSeconds}}
-	case http.StatusInternalServerError:
-		return &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}
 	}
 
 	return &clierr.Error{Code: clierr.Internal, Message: "unknown Notion error"}

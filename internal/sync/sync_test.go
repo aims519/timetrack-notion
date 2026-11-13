@@ -525,7 +525,7 @@ func TestRun_NotionErrorOnOneEntry(t *testing.T) {
 	}{
 		{name: "bad_request", err: &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}, wantState: "blocked"},
 		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantState: "blocked"},
-		{name: "server_error", err: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantState: "failed"},
+		{name: "server_error", err: serverError, wantState: "failed"},
 	}
 
 	for _, tc := range tests {
@@ -550,7 +550,7 @@ func TestRun_RetriesFailedEntry(t *testing.T) {
 	st, lockPath := openSyncStore(t, true)
 	entry := seedStoppedEntry(t, st, nil, testStart, testEnd)
 
-	failing := &fakeEntryManager{createErr: map[string]error{entry.ID: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}}}
+	failing := &fakeEntryManager{createErr: map[string]error{entry.ID: serverError}}
 	if err := Run(t.Context(), st, failing, runClock(0), lockPath, testRetrySettings()); err != nil {
 		t.Fatalf("first Run() = %v, want nil", err)
 	}
@@ -595,6 +595,9 @@ func TestRun_AbortsRun(t *testing.T) {
 		})
 	}
 }
+
+// serverError is the error the client returns for a 5xx
+var serverError = &clierr.Error{Code: clierr.Internal, Message: "server error returned from Notion", Cause: notion.ErrServerError}
 
 // rateLimited is the error the client returns for a 429, with the Retry-After seconds Notion sent
 func rateLimited(retryAfterSeconds int) error {
@@ -730,6 +733,82 @@ func TestRun_RateLimited_Backoff(t *testing.T) {
 				}
 			}
 			checkStored(t, st, limited.ID, "failed", "")
+		})
+	}
+}
+
+// A 5xx is retried with full-jitter backoff, as Notion sends no Retry-After for it, and the entry
+// is marked failed once the attempts are spent (§6.3). Other internal errors, such as a response
+// that can't be parsed, would fail the same way again, so they aren't retried
+func TestRun_ServerError_Retries(t *testing.T) {
+	unparseable := &clierr.Error{Code: clierr.Internal, Message: "unable to parse Notion response"}
+
+	tests := []struct {
+		name         string
+		createErr    error   // every create fails with this
+		createErrSeq []error // or the first creates fail with these, then succeed
+		wantAttempts int
+		wantBounds   []time.Duration // one per wait
+		wantState    string
+		wantPageID   string
+	}{
+		{
+			name:         "every_attempt",
+			createErr:    serverError,
+			wantAttempts: testRetrySettings().maxAttempts,
+			wantBounds:   []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second},
+			wantState:    "failed",
+		},
+		{
+			name:         "once_then_success",
+			createErrSeq: []error{serverError},
+			wantAttempts: 2,
+			wantBounds:   []time.Duration{1 * time.Second},
+			wantState:    "synced",
+			wantPageID:   "page-1",
+		},
+		{name: "not_retryable", createErr: unparseable, wantAttempts: 1, wantState: "failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, lockPath := openSyncStore(t, true)
+			erroring := seedStoppedEntry(t, st, nil, testStart, testEnd)
+			next := seedStoppedEntry(t, st, nil, testStart.Add(2*time.Hour), testEnd.Add(2*time.Hour))
+			m := &fakeEntryManager{createdPageID: "page-1"}
+			if tc.createErr != nil {
+				m.createErr = map[string]error{erroring.ID: tc.createErr}
+			}
+			if tc.createErrSeq != nil {
+				m.createErrSeq = map[string][]error{erroring.ID: tc.createErrSeq}
+			}
+			c := runClock(0)
+
+			if err := Run(t.Context(), st, m, c, lockPath, testRetrySettings()); err != nil {
+				t.Fatalf("Run() = %v, want nil", err)
+			}
+
+			if got := count(m.finds, erroring.ID); got != tc.wantAttempts {
+				t.Errorf("FindEntryPage called %d times for the erroring entry, want %d", got, tc.wantAttempts)
+			}
+			var creates []string
+			for _, call := range m.creates {
+				creates = append(creates, call.localID)
+			}
+			if got := count(creates, erroring.ID); got != tc.wantAttempts {
+				t.Errorf("CreateEntryPage called %d times for the erroring entry, want %d", got, tc.wantAttempts)
+			}
+			if len(c.sleeps) != len(tc.wantBounds) {
+				t.Fatalf("waits = %v, want %d of them", c.sleeps, len(tc.wantBounds))
+			}
+			for i, wait := range c.sleeps {
+				if wait < 0 || wait >= tc.wantBounds[i] {
+					t.Errorf("wait %d = %v, want at least 0 and below %v", i+1, wait, tc.wantBounds[i])
+				}
+			}
+
+			checkStored(t, st, erroring.ID, tc.wantState, tc.wantPageID)
+			checkStored(t, st, next.ID, "synced", "page-1")
 		})
 	}
 }
@@ -884,6 +963,7 @@ func TestRun_PageNotFound_RechecksDataSource(t *testing.T) {
 		recheckInTrash bool
 		wantCode       clierr.ErrorCode // empty when the run carries on
 		wantFirstState string           // the first entry's state when the run carries on
+		wantAttempts   int              // attempts at the first entry, 0 meaning 1
 	}{
 		{name: "create_data_source_gone", recheckErr: pageNotFound, wantCode: clierr.NotFound},
 		{name: "create_data_source_trashed", recheckInTrash: true, wantCode: clierr.NotFound},
@@ -898,10 +978,12 @@ func TestRun_PageNotFound_RechecksDataSource(t *testing.T) {
 		},
 		{name: "recheck_access_denied", recheckErr: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
 		{
-			// The re-check couldn't tell, so the entry is retried next run rather than blocked
+			// The re-check couldn't tell, so the whole entry is retried, 404 and re-check included,
+			// and then left failed for next run rather than blocked
 			name:           "recheck_server_error",
-			recheckErr:     &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"},
+			recheckErr:     serverError,
 			wantFirstState: "failed",
+			wantAttempts:   testRetrySettings().maxAttempts,
 		},
 	}
 
@@ -926,9 +1008,19 @@ func TestRun_PageNotFound_RechecksDataSource(t *testing.T) {
 
 			err := Run(t.Context(), st, m, runClock(0), lockPath, testRetrySettings())
 
-			// Once at the start of the run, and once after the 404
-			if len(m.dataSources) != 2 {
-				t.Errorf("GetDataSource called %d times, want 2", len(m.dataSources))
+			attempts := max(tc.wantAttempts, 1)
+			// Once at the start of the run, and once after each 404
+			if want := 1 + attempts; len(m.dataSources) != want {
+				t.Errorf("GetDataSource called %d times, want %d", len(m.dataSources), want)
+			}
+			var firstWrites int
+			for _, call := range append(m.creates, m.updates...) {
+				if call.localID == first.ID {
+					firstWrites++
+				}
+			}
+			if firstWrites != attempts {
+				t.Errorf("made %d creates and updates for the first entry, want %d", firstWrites, attempts)
 			}
 
 			if tc.wantCode != "" {
@@ -1050,7 +1142,7 @@ func TestTrashPage(t *testing.T) {
 		{
 			name:          "retrieve_server_error",
 			trashErr:      badRequest,
-			retrieveErr:   &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"},
+			retrieveErr:   serverError,
 			wantRetrieves: 1,
 			wantCode:      clierr.Internal,
 		},
@@ -1107,7 +1199,7 @@ func TestTrashPage_NotFound_RechecksDataSource(t *testing.T) {
 		{name: "data_source_fine", wantCode: clierr.NotFound},
 		{name: "check_offline", checkErr: &clierr.Error{Code: clierr.Offline, Message: "unable to communicate with Notion"}, wantCode: clierr.Offline},
 		{name: "check_access_denied", checkErr: &clierr.Error{Code: clierr.AccessDenied, Message: "invalid Notion API key"}, wantCode: clierr.AccessDenied},
-		{name: "check_server_error", checkErr: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantCode: clierr.Internal},
+		{name: "check_server_error", checkErr: serverError, wantCode: clierr.Internal},
 	}
 
 	for _, tc := range tests {
@@ -1155,7 +1247,7 @@ func TestHandleSyncError(t *testing.T) {
 		{name: "data_source_query_rejected", err: dataSourceRejected, wantCode: clierr.Usage},
 		{name: "bad_request", err: &clierr.Error{Code: clierr.Usage, Message: "rejected request by Notion"}, wantState: "blocked"},
 		{name: "not_found", err: &clierr.Error{Code: clierr.NotFound, Message: "object not found in Notion"}, wantState: "blocked"},
-		{name: "server_error", err: &clierr.Error{Code: clierr.Internal, Message: "unexpected Notion error"}, wantState: "failed"},
+		{name: "server_error", err: serverError, wantState: "failed"},
 		{name: "plain_error", err: errors.New("boom"), wantState: "failed"},
 	}
 

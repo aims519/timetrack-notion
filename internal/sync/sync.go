@@ -133,7 +133,7 @@ func syncPendingEntry(ctx context.Context, entriesDataSourceID string, e store.E
 	} else if entryPageID != nil && e.DeletedAt != nil {
 		err = trashPage(ctx, m, entriesDataSourceID, *entryPageID)
 	} else {
-		entryPageID, err = createPage(ctx, m, entriesDataSourceID, entryPageID, title, description, e)
+		entryPageID, err = createPage(ctx, m, entriesDataSourceID, title, description, e)
 	}
 	if err != nil {
 		return syncResult{}, err
@@ -244,7 +244,7 @@ func checkDataSource(ctx context.Context, m notionEntryManager, dataSourceID str
 // createPage creates a Notion page for an entry and returns its ID. A 404 could mean the data
 // source is gone, so it's checked again: if the check fails, that error is returned instead
 // of the 404
-func createPage(ctx context.Context, m notionEntryManager, entriesDataSourceID string, entryPageID *string, title, description string, e store.Entry) (*string, error) {
+func createPage(ctx context.Context, m notionEntryManager, entriesDataSourceID string, title, description string, e store.Entry) (*string, error) {
 	createdPage, err := m.CreateEntryPage(ctx, entriesDataSourceID, title, description, e.ID, *e.TaskPageID, e.StartUTC, *e.EndUTC)
 
 	var cliErr *clierr.Error
@@ -351,8 +351,7 @@ func syncWithRetry(ctx context.Context, entriesDataSourceID string, e store.Entr
 				wait = time.Duration(*tooManyReq.RetryAfterSeconds) * time.Second
 			} else {
 				// No retry specified, fall back to our own wait time + jitter
-				bound := min(settings.cap, settings.base<<(i-1))
-				wait = time.Duration(settings.rnd.Int64N(int64(bound)))
+				wait = backOffWait(settings.base, settings.cap, i, settings.rnd)
 			}
 
 			sleepErr := clock.Sleep(ctx, wait)
@@ -362,9 +361,29 @@ func syncWithRetry(ctx context.Context, entriesDataSourceID string, e store.Entr
 			continue
 		}
 
-		// no TooManyRequestsError, return result
+		// Retry 5xx errors and fail on last attempt
+		if errors.Is(err, notion.ErrServerError) {
+			wait := backOffWait(settings.base, settings.cap, i, settings.rnd)
+
+			sleepErr := clock.Sleep(ctx, wait)
+			if sleepErr != nil {
+				return syncResult{}, sleepErr
+			}
+
+			continue
+		}
+
+		// case not eligible for retry
 		return res, err
 	}
 
 	return res, err
+}
+
+// backOffWait is a helper that returns a wait time for sync retries
+func backOffWait(mainWait, maxWait time.Duration, attempt int, rnd *rand.Rand) time.Duration {
+	bound := min(maxWait, mainWait<<(attempt-1))
+	wait := time.Duration(rnd.Int64N(int64(bound)))
+
+	return wait
 }

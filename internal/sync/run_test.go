@@ -732,38 +732,47 @@ func TestRun_NetworkFailures(t *testing.T) {
 	}
 }
 
-// Ctrl-C during an entry's request stops the run with cancelled, never offline: the client's error
-// also matches ErrNetworkFailure, but it isn't counted as one, even when it would be the
-// testRetrySettings().maxNetworkFailures-th in a row. Nothing is recorded for the entry, so it and
-// every entry after it stay pending, while entries already synced keep their result (§6.3)
-func TestRun_CancelledDuringRequest(t *testing.T) {
+// Ctrl-C during an entry's request lets that request finish, and stops the run before the next
+// entry with cancelled (§6.3). A create that succeeds is saved, so the entry is synced, while
+// every entry after it stays pending. A create that fails with a 429 or 5xx stops in its retry
+// wait, with no further attempt and nothing recorded, so the entry stays pending (question 28)
+func TestRun_CancelledDuringEntry(t *testing.T) {
 	// Entries are synced in start order, so index 0 is reached first
 	tests := []struct {
-		name         string
-		createErrSeq map[int][]error // the entry's first creates fail with these, then succeed
-		wantCreates  []int           // creates per entry
-		wantWaits    int
-		wantStates   []string // a synced entry holds page-1
+		name        string
+		cancelOn    int           // the entry whose create the cancel arrives during
+		createErr   map[int]error // every create for the entry fails with this
+		wantCreates []int         // creates per entry
+		wantWaits   int
+		wantStates  []string // a synced entry holds page-1
 	}{
 		{
-			name:         "first_attempt",
-			createErrSeq: map[int][]error{0: {requestCancelled}},
-			wantCreates:  []int{1, 0, 0},
-			wantStates:   []string{"pending", "pending", "pending"},
+			name:        "create_succeeds",
+			cancelOn:    0,
+			wantCreates: []int{1, 0, 0},
+			wantStates:  []string{"synced", "pending", "pending"},
 		},
 		{
-			// Counted as a network failure, this would be the third in a row and stop the run offline
-			name:         "after_network_failures",
-			createErrSeq: map[int][]error{0: {networkFailure, networkFailure, requestCancelled}},
-			wantCreates:  []int{3, 0, 0},
-			wantWaits:    2,
-			wantStates:   []string{"pending", "pending", "pending"},
+			name:        "create_succeeds_after_a_synced_entry",
+			cancelOn:    1,
+			wantCreates: []int{1, 1, 0},
+			wantStates:  []string{"synced", "synced", "pending"},
 		},
 		{
-			name:         "after_a_synced_entry",
-			createErrSeq: map[int][]error{1: {requestCancelled}},
-			wantCreates:  []int{1, 1, 0},
-			wantStates:   []string{"synced", "pending", "pending"},
+			name:        "create_rate_limited",
+			cancelOn:    0,
+			createErr:   map[int]error{0: rateLimited(2)},
+			wantCreates: []int{1, 0, 0},
+			wantWaits:   1,
+			wantStates:  []string{"pending", "pending", "pending"},
+		},
+		{
+			name:        "create_server_error",
+			cancelOn:    0,
+			createErr:   map[int]error{0: serverError},
+			wantCreates: []int{1, 0, 0},
+			wantWaits:   1,
+			wantStates:  []string{"pending", "pending", "pending"},
 		},
 	}
 
@@ -776,13 +785,21 @@ func TestRun_CancelledDuringRequest(t *testing.T) {
 				entries = append(entries, seedStoppedEntry(t, st, nil, testStart.Add(offset), testEnd.Add(offset)).ID)
 			}
 
-			m := &fakeEntryManager{createdPageID: "page-1", createErrSeq: map[string][]error{}}
-			for i, seq := range tc.createErrSeq {
-				m.createErrSeq[entries[i]] = seq
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			m := &fakeEntryManager{createdPageID: "page-1", createErr: map[string]error{}}
+			for i, err := range tc.createErr {
+				m.createErr[entries[i]] = err
+			}
+			m.onCreate = func(localID string) {
+				if localID == entries[tc.cancelOn] {
+					cancel()
+				}
 			}
 			c := runClock(0)
 
-			err := Run(t.Context(), st, m, c, lockPath, testRetrySettings())
+			err := Run(ctx, st, m, c, lockPath, testRetrySettings())
 
 			checkCode(t, err, clierr.Cancelled)
 			if !errors.Is(err, context.Canceled) {
